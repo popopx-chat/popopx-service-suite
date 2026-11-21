@@ -33,7 +33,7 @@ popopx-service-suite/
 ├── LICENSE
 ├── README.md                Chinese documentation (this file's source of truth)
 ├── README.en.md             this document
-├── install_ubuntu22.sh      production install (Ubuntu 22.04, systemd + venv + requirements.lock)
+├── install_ubuntu22.sh      production install (Ubuntu 22.04, docker by default; --mode native)
 ├── start_macos.sh           one-command dev start (macOS, venv + local node)
 ├── docker-compose.yml       gateway + node, two services
 ├── .env.example             every configuration key, commented; copy to .env
@@ -51,9 +51,13 @@ popopx-service-suite/
 ## Requirements
 
 - macOS 13+ (Apple Silicon or Intel) for development, or Ubuntu 22.04 LTS for production.
-- Python 3.11 is the target interpreter (`gateway/requirements.txt` explains why). The
-  gateway also boots on a standard-library-only interpreter through its fallback HTTP path,
-  which is how the suite stays testable on a machine with no wheels installed.
+- Python 3.11 and the wheels in `gateway/requirements.txt` to serve traffic. There is no
+  reduced server for a machine without them: `create_app()` raises `RuntimeError: FastAPI is
+  not installed; run ./start_macos.sh or ./install_ubuntu22.sh first`, with the `ImportError`
+  text appended (`gateway/app/main.py:3092`). What a standard-library-only machine *can* do is
+  run 12 of the 14 self-test groups, because the runner names the two that import those wheels
+  as `SKIPPED` — that is what the **2286 checks across 12 groups** figure below is, and it is
+  not a gateway answering requests.
 - A running `popopx-agent` / `popopx-chat` node exposing its WebSocket control API on
   `127.0.0.1:5225`.
 
@@ -65,11 +69,17 @@ cp .env.example .env         # change at least POPOPX_ADMIN_TOKEN
 ./start_macos.sh --check     # preflight only: report, start nothing
 ```
 
-`start_macos.sh` detects Docker, otherwise creates a venv, installs
-`gateway/requirements.txt`, generates a 64-character `POPOPX_ADMIN_TOKEN` if `.env` lacks
-one, and then prints the console URL, the H5 origin the phone must be able to reach, and the
-path of the file holding the token. The value itself is never printed; read it on purpose
-with `./start_macos.sh --show-token`.
+`start_macos.sh` uses the venv path by default and the compose path only when you pass
+`--docker`. That path insists the interpreter be Python 3.11: if it cannot find one it prints
+`brew install python@3.11` and exits 3 (point it somewhere else with
+`POPOPX_PYTHON=/path/to/python3.11 ./start_macos.sh`). It creates `.venv` at the repository
+root and installs `gateway/requirements.txt` only when the venv is new or that file is newer
+than `.venv/.deps-ok`, so a warm start skips about 20 seconds of network. It generates a
+64-character `POPOPX_ADMIN_TOKEN` (`openssl rand -hex 32`) when `.env` lacks one, then prints
+the console URL, the H5 origin the phone must be able to reach, and the path of the file
+holding the token. The value itself is never printed; read it on purpose
+with `./start_macos.sh --show-token`. `--docker` needs docker on PATH and the daemon running,
+and the script warns that a containerised gateway cannot reach a node running on macOS.
 
 venv is the default rather than Docker for one concrete reason: the node binds its
 WebSocket API to `127.0.0.1`, and inside Docker Desktop a container's "host" is the linuxvm
@@ -83,20 +93,43 @@ the file exists, not that the two containers come up.
 ## Quick start — Ubuntu 22.04 (production)
 
 ```bash
-git clone <your-private-remote> /opt/popopx-service-suite
-cd /opt/popopx-service-suite
-sudo ./install_ubuntu22.sh
+git clone https://github.com/popopx-chat/popopx-service-suite
+cd popopx-service-suite
+sudo ./install_ubuntu22.sh                # default --mode docker: gateway (+ node) as containers
+sudo ./install_ubuntu22.sh --mode native  # venv + systemd unit, no containers
+./install_ubuntu22.sh --help              # --with-node / --port / --skip-apt
 ```
 
-The installer creates the system user `popopx`, the venv at `/opt/popopx-service-suite/venv`
-and a pinned `requirements.lock` from `pip freeze`, puts the configuration in
-`/etc/popopx-service-suite/env` (`EnvironmentFile=` of the unit, mode 0750), the state in
-`/var/lib/popopx-service-suite`, and installs `popopx-gateway.service` plus — when it also
-brings up a node — `popopx-node.service`. Its last step prints the two follow-up commands
-(`--self-test` and `--check-routes`) and a numbered NEXT STEPS block that is deliberately not
-done for you: set `POPOPX_PUBLIC_BASE_URL` to the exact https origin the phone loads, give the
-gateway the official voucher public key, keep the node's loopback-only unauthenticated
-WebSocket port off any network, open only the gateway port and only after TLS, and back up
+Clone it wherever you like — `/opt/popopx-service-suite/src` is the installer's own copy, not
+your checkout: docker mode copies the compose file, `gateway/`, `official_tools/` and
+`LICENSE` into it, native mode copies the whole repo minus `.git` and keeps the previous copy
+as `src.prev`. It needs root, `curl`, `systemctl`, `python3` and (unless `--skip-apt`) apt.
+Both modes then write a per-host env file with three values
+— `POPOPX_ADMIN_TOKEN`, `POPOPX_ALERT_WEBHOOK_TOKEN`, `POPOPX_GATEWAY_PORT` — at mode 0600,
+values never displayed. If that file already exists the installer keeps it (the pre-run copy
+goes to `.env.bak.<utc>`) and refuses to let `--port` overwrite what is in it, because the
+gateway reads its socket from that file and nothing else. Where the file lives is the one
+thing the modes differ on operationally: `src/.env` for compose to read in docker mode,
+`/etc/popopx-service-suite/env` in native mode, where it is the unit's `EnvironmentFile=`.
+
+`--mode native` is the layout most people expect from a self-hosted service. It creates the
+nologin system user `popopx` homed in `/var/lib/popopx-service-suite` (0750, owned by
+`popopx`, alongside `/etc/popopx-service-suite`), installs `python3.11` + venv, builds the
+venv at `/opt/popopx-service-suite/venv`, installs `src/gateway/requirements.txt` and pins
+the resolved set to `/opt/popopx-service-suite/requirements.lock` from `pip freeze`, then
+installs `/etc/systemd/system/popopx-gateway.service`. `--with-node` adds a second nologin
+user `popopx-node` and `popopx-node.service`, which reads its own
+`EnvironmentFile=/etc/default/popopx-node`. Docker mode does not create `popopx` — it chowns
+`/var/lib/popopx-service-suite` to the image's uid 1001 instead, because a bind mount owned
+by whoever ran `install` fails on the first ledger write with a `SQLITE_CANTOPEN` that looks
+like a corrupt database.
+
+Either way the last step prints the two verification commands (`--self-test` and
+`--check-routes`) and a numbered NEXT STEPS block that is deliberately not done for you: set
+`POPOPX_PUBLIC_BASE_URL` to the exact https origin the phone loads (`PopopxH5Launcher` signs
+that URL); give the gateway the official voucher public key only if you turned admission mode
+on; keep the node's unauthenticated WebSocket port on loopback and never proxy 5225 onto a
+network; open only the gateway port and only after TLS is terminated; and back up
 `/var/lib/popopx-service-suite` — `gateway.db` holds the channel identity private keys
 alongside the ledger and every pairwise session secret, on purpose, because a rotation must
 commit in the same transaction as the frame it delivers. Lose it and every existing
@@ -115,11 +148,14 @@ plugin answers `GET <its own prefix>/status`, which is what the five console pan
 ## Typical operations
 
 Every `/api/v1/` call takes the admin token in a header (a `?token=` query parameter is also
-accepted). The header name is literal: the core's `admin_required` does not parse
-`Authorization: Bearer`. The one place that does is `privacy_sso`'s device-facing route
-(`privacy_sso_plugin.py:1522` `bearer_secret`), and the console sends both headers
-(`gateway/app/static/index.html:585` and `:587`) so it works whichever route it is on. Field
-names below are the ones the handlers read.
+accepted). The header name is literal, and the suite does not use one name everywhere: the
+core's `admin_required` reads only `x-admin-token` or `?token=`
+(`gateway/app/main.py:3170`, `:3254`) and never parses `Authorization: Bearer`; the one
+place that does is `privacy_sso`'s device-facing route (`privacy_sso_plugin.py:1521`
+`bearer_secret`); `alert_ops`' console routes read `X-Popopx-Admin-Token`
+(`alert_ops_plugin.py:1105`). The console sends all three at once
+(`gateway/app/static/index.html:585`–`:587`) so one token works whichever route it lands on.
+Field names below are the ones the handlers read.
 
 ```bash
 TOKEN=$(grep '^POPOPX_ADMIN_TOKEN=' .env | cut -d= -f2-)
@@ -194,7 +230,8 @@ internal function, so a failure still answers 200 and the body's `error` is the 
 
 ## Configuration
 
-Every key lives in the root [`.env.example`](.env.example) (41 keys, each commented);
+Every key lives in the root [`.env.example`](.env.example) (48 keys, each commented — count
+them with `grep -cE '^[A-Z0-9_]+=' .env.example`);
 `cp .env.example .env` and edit that. Lookup order is `--env <path>` → `$POPOPX_ENV_FILE` →
 `.env` at the repository root, and process environment overrides keys from the file (the
 orchestrator wins).

@@ -28,7 +28,7 @@ popopx-service-suite/
 ├── LICENSE
 ├── README.md                本文档（中文）
 ├── README.en.md             英文版，内容与本文档逐节对应
-├── install_ubuntu22.sh      生产安装（Ubuntu 22.04，systemd + venv + requirements.lock）
+├── install_ubuntu22.sh      生产安装（Ubuntu 22.04，默认 docker；--mode native 走 systemd）
 ├── start_macos.sh           开发一键启动（macOS，venv + 本机节点）
 ├── docker-compose.yml       网关 + 节点两服务
 ├── .env.example             全部配置项与注释；复制为 .env
@@ -43,22 +43,81 @@ popopx-service-suite/
         └── static/          index.html 管理后台
 ```
 
-## 跑起来
+## 环境要求
+
+- 开发：macOS 13+（Apple Silicon 或 Intel）；生产：Ubuntu 22.04 LTS。
+- 起服务要 Python 3.11 加 `gateway/requirements.txt` 里的 wheel。没装这些 wheel 的机器上并
+  没有「降级 HTTP 路径」这回事：`create_app()` 直接抛 `RuntimeError: FastAPI is not installed;
+  run ./start_macos.sh or ./install_ubuntu22.sh first`（后面拼 `ImportError` 原文，见
+  `gateway/app/main.py:3092`）。这种机器能做的是跑 14 组自检里的 12 组——运行器会把依赖那两个
+  wheel 的组点名 `SKIPPED`。下面「自检」里的 **2286 条 / 12 组** 就是这么来的，它不是一台正在
+  应答的网关。
+- 需要一个正在运行的 `popopx-agent` / `popopx-chat` 节点，它的 WebSocket 控制口在
+  `127.0.0.1:5225`。没有节点也能起服务，见下面「启动行为与插件开关」。
+
+## 快速开始 — macOS（开发、iPhone 调试）
 
 ```bash
 cp .env.example .env         # 至少改掉 POPOPX_ADMIN_TOKEN
 ./start_macos.sh             # 网关 http://127.0.0.1:8080/ ，节点 127.0.0.1:5225
 ./start_macos.sh --check     # 只做预检并报告，不启动任何进程
-sudo ./install_ubuntu22.sh   # 生产机
 ```
 
+`start_macos.sh` 默认走 venv，`--docker` 才走 compose。venv 路径要求解释器就是
+Python 3.11：找不到会打印 `brew install python@3.11` 并退出 3（装在别处就
+`POPOPX_PYTHON=/path/to/python3.11 ./start_macos.sh`）。虚拟环境建在仓库根的 `.venv`，
+只有它不存在、或 `gateway/requirements.txt` 比 `.venv/.deps-ok` 新时才装依赖——venv 已就绪时
+每次启动省掉约 20 秒的网络往返。`.env` 里缺 `POPOPX_ADMIN_TOKEN` 时现生成一个 64 字符的
+（`openssl rand -hex 32`）写回文件、值不打印。`--docker` 需要 docker 在 PATH 且守护进程在跑，
+脚本还会警告：容器问不到这台 Mac 上的节点。
+
 启动后终端会打印控制台地址、手机侧 H5 来源，以及 token 所在的文件位置——值本身默认不打印，
-要读出来用 `./start_macos.sh --show-token`。默认走 venv 而不是
-Docker：节点的 WebSocket API 只绑 127.0.0.1，而 Docker Desktop 里容器的 "host" 是
+要读出来用 `./start_macos.sh --show-token`。默认走 venv 而不是 Docker：节点的 WebSocket API
+只绑 127.0.0.1，而 Docker Desktop 里容器的 "host" 是
 linuxvm 的回环，不是这台 Mac 的回环——`network_mode: host` 是 Linux 才有的内核能力。
 `docker-compose.yml` 是给 Linux 生产机的起点：它和两个 shell 启动脚本被同一条断言审着
 （`every_launcher_probes_a_route_that_exists`，路由不存在就红），但这台开发机上没有 docker，
 **它本身从未被执行过**——`--check-routes` 证的是文件里那条 URL 存在，不是两个容器起得来。
+
+## 快速开始 — Ubuntu 22.04（生产）
+
+```bash
+git clone https://github.com/popopx-chat/popopx-service-suite
+cd popopx-service-suite
+sudo ./install_ubuntu22.sh                # 默认 --mode docker：网关（+节点）跑容器
+sudo ./install_ubuntu22.sh --mode native  # venv + systemd 单元，不用容器
+./install_ubuntu22.sh --help              # --with-node / --port / --skip-apt
+```
+
+仓库克隆在哪儿都行——`/opt/popopx-service-suite/src` 是安装脚本自己复制出来的，不是你的工作副本：
+docker 模式只复制 compose 文件、`gateway/`、`official_tools/` 和 `LICENSE`，native 模式复制整个
+仓库并去掉 `.git`，上一份留成 `src.prev`。它只要 root、`curl`、`systemctl`、`python3`，
+以及（没加 `--skip-apt` 时）apt。两种模式都会写一份
+每主机独立的 env 文件，里面三个值——`POPOPX_ADMIN_TOKEN`、`POPOPX_ALERT_WEBHOOK_TOKEN`、
+`POPOPX_GATEWAY_PORT`——0600 权限、值不显示。文件已存在时脚本保留它（改前副本存成
+`.env.bak.<utc>`），并且**不让 `--port` 覆盖文件里已有的值**，因为网关只从这份文件读它监听的
+端口。两种模式真正需要在运维上分清的是文件位置：docker 模式在 `src/.env` 交给 compose 读，
+native 模式在 `/etc/popopx-service-suite/env`，也就是 unit 的 `EnvironmentFile=`。
+
+`--mode native` 才是大家熟悉的那套自托管布局：建 nologin 系统用户 `popopx`（家目录
+`/var/lib/popopx-service-suite`，与 `/etc/popopx-service-suite` 一起 0750、属主 `popopx`），
+装 `python3.11` 与 venv 模块，在 `/opt/popopx-service-suite/venv` 建虚拟环境，装
+`src/gateway/requirements.txt` 并把解析出来的版本用 `pip freeze` 钉成
+`/opt/popopx-service-suite/requirements.lock`，最后装 `/etc/systemd/system/popopx-gateway.service`。
+`--with-node` 再加一个 nologin 用户 `popopx-node` 和 `popopx-node.service`（它自己的
+`EnvironmentFile=/etc/default/popopx-node`）。docker 模式不建 `popopx` 用户，而是把
+`/var/lib/popopx-service-suite` chown 给镜像里的 uid 1001——换成谁运行谁拥有的 bind mount，
+容器第一次写账本就会 `SQLITE_CANTOPEN`，看起来像数据库坏了。
+
+两种模式的最后一步都打印两条验证命令（`--self-test`、`--check-routes`）和一段刻意不代你做完的
+NEXT STEPS：把 `POPOPX_PUBLIC_BASE_URL` 设成手机真正加载的那个 https origin（`PopopxH5Launcher`
+签的就是它）；只有开了准入模式才需要给网关官方算力码公钥；节点的 WebSocket 口没有鉴权、只绑
+回环，不要把 5225 代理到网络上；只放行网关端口，且要等 TLS 就位；最后备份
+`/var/lib/popopx-service-suite`——`gateway.db` 里除了账本和每个 pairwise 会话密钥，还存着频道
+身份私钥，这是有意的：轮换必须和它投递的那一帧在同一个事务里提交。这个目录丢了，现有全部
+零知识频道就永久哑掉。
+
+## 启动行为与插件开关
 
 节点在启动那一刻没起来不是致命错误：网关照常开始服务，`/healthz` 报
 `node_connected: false`，桥接层按封顶的退避一直重试，节点起来后自己接上（`strict=True`
@@ -112,10 +171,14 @@ curl -s $API/api/v1/plugins/alert_ops/status -H "X-Admin-Token: $TOKEN"
 `polls` 8、`ai_agent` 6、`privacy_sso` 6），它们走 `include_router` 进来，`--print-routes` 看不见，
 所以自检里有 `every_plugin_*` 与逐插件的 `plugin_<id>_answers_status_at_its_own_prefix` 补上另一半。
 
-鉴权只有一条规则：`/api/v1/*` 要 `X-Admin-Token`（也收 `?token=`；核心的 `admin_required` 不解析
-`Authorization: Bearer`，全套件只有 `privacy_sso` 的设备侧路由读它，见 `privacy_sso_plugin.py:1521`
-`bearer_secret`，管理后台两个头都发，见 `gateway/app/static/index.html:585`、`:587`），缺失或不对一律
-`401 {"ok":false,"error":"unauthorized"}`。四类例外：`/`、`/healthz`、`/h5/{article_id}` 公开；
+鉴权只有一条规则：`/api/v1/*` 要 `X-Admin-Token`，也收 `?token=`；缺失或不对一律
+`401 {"ok":false,"error":"unauthorized"}`。但请求头名并不统一：核心 `admin_required` 与插件
+中间件 `plugin_auth` 都只读 `x-admin-token` 或 `?token=`（`gateway/app/main.py:3170`、`:3254`），
+不解析 `Authorization: Bearer`——全套件只有 `privacy_sso` 的设备侧路由读它
+（`privacy_sso_plugin.py:1521` `bearer_secret`），`alert_ops` 的控制台路由读
+`X-Popopx-Admin-Token`（`alert_ops_plugin.py:1105`）。管理后台三个头一起发
+（`gateway/app/static/index.html:585`–`:587`），一个令牌不用按路由切换。四类例外：
+`/`、`/healthz`、`/h5/{article_id}` 公开；
 `POST /api/v1/verifyH5Auth` 靠手机侧的 HMAC 签名证明调用者；插件路径以 `/webhook`、`/verify`、
 `/callback` 结尾的不问 token（它们各自有 per-source token 或背靠背调用方）；
 `GET /api/v1/plugins/sso/sessions/{id}` 也免 token——扫码页要能在拿到登录态之前轮询它。
@@ -138,7 +201,8 @@ broker 超时……`node_error` 里就是原因），只有 `node_unreachable` �
 
 ## 配置
 
-全部配置项在根目录的 [`.env.example`](.env.example)（41 个键，每个都有注释），
+全部配置项在根目录的 [`.env.example`](.env.example)（48 个键，每个都有注释；用
+`grep -cE '^[A-Z0-9_]+=' .env.example` 能数出同一个数），
 `cp .env.example .env` 之后改它。查找顺序是 `--env <path>` → `$POPOPX_ENV_FILE` →
 仓库根目录的 `.env`；进程环境覆盖文件里的同名键（编排器说的算）。
 
