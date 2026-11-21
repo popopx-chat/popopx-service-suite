@@ -54,6 +54,7 @@ import asyncio
 import json
 import logging
 import socket
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple
@@ -806,6 +807,24 @@ class BridgeStats:
         }
 
 
+def _node_unavailable_errors() -> Tuple[type, ...]:
+    """Exception classes meaning "the node is not answering", not "do not start".
+
+    `websockets` is imported lazily in :meth:`AgentBridge._connect_once` so this module
+    stays importable without the wheel, which rules out naming its exception base class
+    in an `except` clause; resolving it here keeps both true. Skipping it cost the
+    degraded boot: a port answering with something other than HTTP raises
+    `InvalidMessage`, which is a `WebSocketException` and *not* an `OSError`, so it went
+    straight past the handler in :meth:`AgentBridge.start` and the gateway exited with
+    the traceback instead of serving with `node_connected: false`.
+    """
+    try:
+        from websockets.exceptions import WebSocketException  # noqa: PLC0415
+    except ImportError:  # pragma: no cover - the wheel-less path
+        return (NodeError, OSError, asyncio.TimeoutError)
+    return (NodeError, OSError, asyncio.TimeoutError, WebSocketException)
+
+
 class AgentBridge:
     """Asyncio WebSocket client for one node connection and one service user.
 
@@ -886,7 +905,7 @@ class AgentBridge:
         self._closing = False
         try:
             await self._connect_once(timeout=self.command_timeout)
-        except (NodeError, OSError, asyncio.TimeoutError) as exc:
+        except _node_unavailable_errors() as exc:
             if strict:
                 raise
             LOG.warning(
@@ -1792,6 +1811,49 @@ async def _async_checks() -> List[str]:
     check("real_closed_port_state_listener_fired", len(states) == 2 and states[1][0] is False)
     await honest.stop()
 
+    # …and a port that is NOT empty, because that is what actually killed a production
+    # boot on 2026-11-22. Something answering with bytes that are not an HTTP response
+    # makes `websockets` raise `InvalidMessage`, a `WebSocketException` and not an
+    # `OSError`, which went straight through the boot handler and ended the gateway.
+    # Every fake above raises `ConnectionRefusedError`, so this suite could not have
+    # seen that hole; the listener below is a real socket so the library, not this
+    # file, picks the exception class.
+    junk, junk_port = _non_http_port()
+    handshake: List[Tuple[bool, str]] = []
+
+    async def on_handshake_state(up: bool, detail: str) -> None:
+        handshake.append((up, detail))
+
+    weird = AgentBridge(ws_url="ws://127.0.0.1:%d" % junk_port, command_timeout=5.0)
+    weird._on_state = on_handshake_state  # type: ignore[assignment]
+    try:
+        await weird.start()
+        handshake_survived = True
+    except Exception:  # noqa: BLE001 - escaping the handler IS the defect under test
+        handshake_survived = False
+    check(
+        "boot_survives_a_non_http_handshake",
+        handshake_survived and not weird.connected
+        and weird._supervisor is not None and not weird._supervisor.done(),
+    )
+    check(
+        "boot_non_http_handshake_reports_honest_state",
+        bool(handshake) and handshake[-1][0] is False and "not connected at boot" in handshake[-1][1],
+    )
+    await weird.stop()
+    junk.close()
+
+    # The class list itself, both ways round: with the wheel installed its exception base
+    # has to be listed, and on a machine without it the three documented classes have to
+    # be exactly what `start()` catches. Either branch is an assertion, so the check does
+    # not quietly become true on the configuration it cannot test.
+    try:
+        from websockets.exceptions import WebSocketException
+        tuple_matches = WebSocketException in _node_unavailable_errors()
+    except ImportError:  # pragma: no cover - the wheel-less path
+        tuple_matches = _node_unavailable_errors() == (NodeError, OSError, asyncio.TimeoutError)
+    check("boot_error_tuple_matches_the_installed_websockets", tuple_matches)
+
     # A user that has never minted an address answers `/_show_address` with an error
     # frame rather than an empty success — both frames below are the bytes a real
     # `popopx-chat` 7.1.2.0 sent on 2026-11-21. The pairing route asks this method
@@ -1829,6 +1891,35 @@ async def _strict_start(refuse) -> None:  # noqa: ANN001 - test helper
     bridge = AgentBridge(ws_url="ws://127.0.0.1:5225")
     bridge._connect_once = refuse  # type: ignore[assignment]
     await bridge.start(strict=True)
+
+
+def _non_http_port() -> Tuple[socket.socket, int]:
+    """A port that answers, but not with HTTP: returns the listener and its port.
+
+    The caller closes the listener to end the thread. This is what the node's
+    WebSocket control API looks like to a client when the port is owned by something
+    else — a plain web server, a proxy, a node still writing its first line — and the
+    point of the shape is that `websockets` turns it into `InvalidMessage`, which is
+    not an `OSError`.
+    """
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(4)
+
+    def answer() -> None:
+        listener.settimeout(10.0)
+        try:
+            while True:
+                conn, _ = listener.accept()
+                try:
+                    conn.sendall(b"NOT HTTP AT ALL\r\n\r\n")
+                finally:
+                    conn.close()
+        except OSError:
+            pass  # the caller closed the listener; the thread's work is finished
+
+    threading.Thread(target=answer, daemon=True).start()
+    return listener, int(listener.getsockname()[1])
 
 
 def _closed_port() -> int:

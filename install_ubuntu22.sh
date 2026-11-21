@@ -284,8 +284,20 @@ run_native() {
   install -d -m 0755 "${INSTALL_ROOT}"
   log "syncing source to ${INSTALL_ROOT}"
   rm -rf "${INSTALL_ROOT}/src.new"   # scratch path this script created, nothing else
-  cp -a "${REPO_DIR}" "${INSTALL_ROOT}/src.new"
-  rm -rf "${INSTALL_ROOT}/src.new/.git"
+  install -d -m 0755 "${INSTALL_ROOT}/src.new"
+  # tar rather than rsync (see run_docker:214 — rsync is not in the Ubuntu cloud-image
+  # base), and excluding instead of `cp -a` then `rm -rf .git`: the checkout IS the dev
+  # environment on a workstation, so a plain copy carried `.env` — a live admin token —
+  # into ${INSTALL_ROOT}/src, where config.py finds it whenever POPOPX_ENV_FILE is unset,
+  # making it a second source of truth quieter than the first. `.venv` does not survive
+  # the move (a virtualenv is path-relative), the venv here is built, never carried, and
+  # `*.db` would have carried real ledger rows into a deployment that must start empty.
+  # `*.db` alone misses the SQLite sidecars, hence -shm and -wal; the same nine patterns
+  # install_macos.sh hands to rsync, so the two production paths copy the same tree.
+  ( cd "${REPO_DIR}" && tar -cf - \
+        --exclude .git --exclude .env --exclude '.env.bak.*' --exclude .venv \
+        --exclude .run --exclude .data --exclude '*.db' --exclude '*.db-shm' --exclude '*.db-wal' \
+        . ) | ( cd "${INSTALL_ROOT}/src.new" && tar -xpf - )
   if [[ -d "${INSTALL_ROOT}/src" ]]; then
     rm -rf "${INSTALL_ROOT}/src.prev"
     mv "${INSTALL_ROOT}/src" "${INSTALL_ROOT}/src.prev"

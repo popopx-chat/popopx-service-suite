@@ -227,7 +227,7 @@ KIND_SYSTEM = "system"
 #: plugin, which claims it by prefix inside its own `handle_inbound`. A member's
 #: own re-request for a key is NOT here: the client sends `rotate:<channelId>`
 #: (`ChannelKeyRotationManager.swift:920`), which the classifier claims as
-#: `rotate_request` (`agent_bridge.py:143`) and `_kind_rotate_request` handles.
+#: `rotate_request` (`agent_bridge.py:261`) and `_kind_rotate_request` handles.
 PAYLOAD_CHANNEL_SUBSCRIBE = "channel:subscribe:"
 PAYLOAD_MENU_OPEN = "menu:"
 MENU_KEYWORD_PREFIX = "kw:"
@@ -3090,7 +3090,7 @@ def create_app(config: Optional[Config] = None, *, gateway: Optional[Gateway] = 
         from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
     except ImportError as exc:  # pragma: no cover — the only reason this fires is an uninstalled wheel
         raise RuntimeError(
-            "FastAPI is not installed; run ./start_macos.sh or ./install_ubuntu22.sh first (%s)" % exc
+            "FastAPI is not installed; run ./start_macos.sh, ./install_macos.sh or ./install_ubuntu22.sh first (%s)" % exc
         ) from None
 
     cfg = config if config is not None else load_config()
@@ -3263,8 +3263,9 @@ def create_app(config: Optional[Config] = None, *, gateway: Optional[Gateway] = 
         """Liveness for a load balancer: no admin token, no database write, no node call.
 
         The path is what every launcher in this repo probes (`start_macos.sh`,
-        `install_ubuntu22.sh`, `docker-compose.yml`, the Dockerfile), so renaming it
-        here would break the healthcheck of an existing deployment.
+        `install_macos.sh`, `install_ubuntu22.sh`, `docker-compose.yml`), so renaming it
+        here would break the healthcheck of an existing deployment. `gateway/Dockerfile`
+        names the path in a comment and deliberately ships no `HEALTHCHECK` of its own.
         """
         return {
             "ok": True,
@@ -4408,6 +4409,7 @@ ORACLE_CENSUS_FILES: Tuple[str, ...] = (
     "README.en.md",
     "start_macos.sh",
     "install_ubuntu22.sh",
+    "install_macos.sh",
     "docker-compose.yml",
     "gateway/Dockerfile",
 )
@@ -4749,7 +4751,7 @@ def self_test() -> List[str]:
     advertised: set = set()
     launched_via_main = 0
     url_in_text = re.compile(r"https?://[^\s\"'<>)]*")
-    for launcher in ("start_macos.sh", "install_ubuntu22.sh", "docker-compose.yml"):
+    for launcher in ("start_macos.sh", "install_macos.sh", "install_ubuntu22.sh", "docker-compose.yml"):
         candidate = suite_root / launcher
         if not candidate.exists():
             continue
@@ -4776,11 +4778,11 @@ def self_test() -> List[str]:
           bool(probed) and probed <= {str(row["path"]) for row in routes})
     check("every_launcher_advertises_a_console_that_responds",
           bool(advertised) and advertised <= {str(row["path"]) for row in routes})
-    # Counted, not asserted equal to three: compose starts the container and the
-    # container's CMD is this module, so only the two shell launchers can name the
-    # entrypoint here. Requiring three would make the check fail for a reason that
+    # Counted, not asserted equal to four: compose starts the container and the
+    # container's CMD is this module, so only the three shell launchers can name the
+    # entrypoint here. Requiring four would make the check fail for a reason that
     # has nothing to do with what it is measuring.
-    check("both_shell_launchers_run_the_module_entrypoint", launched_via_main == 2)
+    check("every_shell_launcher_runs_the_module_entrypoint", launched_via_main == 3)
 
     # The plugin mount is the one part of the route table that `route_census` cannot
     # see — it reads `@app.<verb>` decorators inside this function, and a plugin's
@@ -5643,7 +5645,7 @@ def http_self_test() -> List[str]:
         config = load_config()
         gateway = Gateway(config)
         socket = _FakeSocket()
-        gateway.eco.bridge._ws = socket          # what `connected` reads (agent_bridge.py:817)
+        gateway.eco.bridge._ws = socket          # what `connected` reads (agent_bridge.py:879)
         gateway.eco.bridge._started = True
         gateway.eco.bridge.user_id = 1           # what `_require_user` reads; boot sets it from the node
         gateway.eco.bridge.command = _fake_command
@@ -5676,14 +5678,46 @@ def http_self_test() -> List[str]:
         # crashes has to come back as the 500 the operator would see, so it can be
         # listed by route instead of aborting the run at the first one.
         client = TestClient(app, raise_server_exceptions=False)
-        routes = [route for route in app.routes if isinstance(route, APIRoute)]
+
+        def live_api_routes(container: Any, prefix: str = "") -> List[Tuple[APIRoute, str]]:
+            """`(route, full path)` for every APIRoute this app dispatches to.
+
+            FastAPI up to 0.128 appended an `include_router()`'s routes straight onto
+            `app.routes`, already carrying their full path. 0.165 — the version
+            `requirements.txt` resolves today, since it pins only a range — keeps one
+            `_IncludedRouter` in their place, holding the child in `original_router`
+            and the include prefix in `include_context.prefix`, with no `path` of its
+            own. Reading only the flat list reported this suite's 30 plugin routes as
+            unmounted on that version while `GET /api/v1/plugins/ai/status` still
+            answered 200: the app was fine, the census was not, and the routes it did
+            not see were quietly dropped from the GET sweep below rather than
+            reported. Recursing gives one answer for both shapes.
+            """
+            found: List[Tuple[APIRoute, str]] = []
+            for route in getattr(container, "routes", []) or []:
+                if isinstance(route, APIRoute):
+                    found.append((route, prefix + route.path))
+                    continue
+                child = getattr(route, "original_router", None) or getattr(route, "router", None)
+                if child is None:
+                    child = route if getattr(route, "routes", None) else None
+                if child is None:
+                    continue
+                context = getattr(route, "include_context", None)
+                nested = getattr(context, "prefix", None)
+                if nested is None:
+                    nested = getattr(route, "path", "") or ""
+                found.extend(live_api_routes(child, prefix + nested))
+            return found
+
+        routes = live_api_routes(app)
 
         def request_is_a_query_parameter(route: APIRoute) -> bool:
             return any(field.name == "request" for field in route.dependant.query_params)
 
         bent = sorted(
-            "%s %s" % (",".join(sorted(route.methods - {"HEAD", "OPTIONS"})), route.path)
-            for route in routes if request_is_a_query_parameter(route)
+            "%s %s" % (",".join(sorted(route.methods - {"HEAD", "OPTIONS"})), path)
+            for route, path in routes if request_is_a_query_parameter(route)
         )
         detail("no_endpoint_takes_request_as_a_query_parameter", bent)
 
@@ -5706,7 +5740,7 @@ def http_self_test() -> List[str]:
             "the_query_parameter_detector_does_not_fire_on_a_resolved_name",
             not any(
                 request_is_a_query_parameter(route)
-                for route in app.routes if isinstance(route, APIRoute)
+                for route, _ in routes
             ),
         )
 
@@ -5717,23 +5751,23 @@ def http_self_test() -> List[str]:
 
         offenders: List[str] = []
         swept = 0
-        for route in routes:
+        for route, path in routes:
             if "GET" not in route.methods:
                 continue
-            url = concrete(route.path)
+            url = concrete(path)
             response = client.get(url, headers=headers)
             swept += 1
             if response.status_code >= 500 or response.status_code == 422:
                 offenders.append("GET %s -> %d %s" % (url, response.status_code, response.text[:90]))
-            elif route.path.startswith("/api/v1/plugins/") and response.status_code == 401:
+            elif path.startswith("/api/v1/plugins/") and response.status_code == 401:
                 offenders.append("GET %s was refused by the gateway, not answered" % url)
         detail("every_GET_route_answers_when_the_token_is_present", offenders)
         declared_keys = {"%s %s" % (str(row["verb"]).upper(), row["path"]) for row in route_census()} | {
             line for paths in plugin_route_paths().values() for line in paths
         }
         live_keys = {
-            "%s %s" % (method, route.path)
-            for route in routes for method in (route.methods - {"HEAD", "OPTIONS"})
+            "%s %s" % (method, path)
+            for route, path in routes for method in (route.methods - {"HEAD", "OPTIONS"})
         }
         detail("every_declared_route_is_actually_mounted", sorted(declared_keys - live_keys))
         check(

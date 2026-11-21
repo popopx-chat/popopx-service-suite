@@ -34,6 +34,7 @@ popopx-service-suite/
 ├── README.md                Chinese documentation (this file's source of truth)
 ├── README.en.md             this document
 ├── install_ubuntu22.sh      production install (Ubuntu 22.04, docker by default; --mode native)
+├── install_macos.sh         production install (macOS, launchd native, no docker mode)
 ├── start_macos.sh           one-command dev start (macOS, venv + local node)
 ├── docker-compose.yml       gateway + node, two services
 ├── .env.example             every configuration key, commented; copy to .env
@@ -50,13 +51,15 @@ popopx-service-suite/
 
 ## Requirements
 
-- macOS 13+ (Apple Silicon or Intel) for development, or Ubuntu 22.04 LTS for production.
+- macOS 13+ (Apple Silicon or Intel) for development. Production runs on Ubuntu 22.04 LTS, or on
+  macOS 13+ through the launchd-native path (`install_macos.sh`).
 - Python 3.11 and the wheels in `gateway/requirements.txt` to serve traffic. There is no
   reduced server for a machine without them: `create_app()` raises `RuntimeError: FastAPI is
-  not installed; run ./start_macos.sh or ./install_ubuntu22.sh first`, with the `ImportError`
+  not installed; run ./start_macos.sh, ./install_macos.sh or ./install_ubuntu22.sh first`, with
+  the `ImportError`
   text appended (`gateway/app/main.py:3092`). What a standard-library-only machine *can* do is
   run 12 of the 14 self-test groups, because the runner names the two that import those wheels
-  as `SKIPPED` — that is what the **2286 checks across 12 groups** figure below is, and it is
+  as `SKIPPED` — that is what the **2289 checks across 12 groups** figure below is, and it is
   not a gateway answering requests.
 - A running `popopx-agent` / `popopx-chat` node exposing its WebSocket control API on
   `127.0.0.1:5225`.
@@ -85,10 +88,98 @@ venv is the default rather than Docker for one concrete reason: the node binds i
 WebSocket API to `127.0.0.1`, and inside Docker Desktop a container's "host" is the linuxvm
 loopback, not this Mac's loopback — `network_mode: host` is a Linux kernel capability.
 `docker-compose.yml` is a starting point for Linux production boxes. It is reviewed by the
-same assertion as the two shell launchers (`every_launcher_probes_a_route_that_exists` turns
-red when a route it names does not exist), but there is no Docker on this development
+same assertion as the three shell launchers (`every_launcher_probes_a_route_that_exists` turns
+red when a route it names does not exist; the sibling
+`every_shell_launcher_runs_the_module_entrypoint` counts `python -m app.main` in the three
+scripts, and composes a container whose CMD is not that file's text, so it asserts 3 rather
+than 4), but there is no Docker on this development
 machine, so **compose has never been executed here** — `--check-routes` proves the URL in
 the file exists, not that the two containers come up.
+
+## Quick start — macOS (production)
+
+```bash
+sudo ./install_macos.sh                 # launchd native; binds 127.0.0.1 only by default
+sudo ./install_macos.sh --lan           # explicit opt-in to 0.0.0.0 — see divergence 2 below
+sudo ./install_macos.sh --with-node     # adds a second LaunchDaemon for the node (_popopx-node)
+./install_macos.sh --check              # read-only preflight: zero writes, needs no root
+./install_macos.sh --dry-run            # renders both plists and the env file to a temp dir
+sudo ./install_macos.sh --uninstall     # service, account, code and config go; the state dir stays
+```
+
+This path is the peer of Ubuntu's `--mode native`: a dedicated service account, code,
+configuration, state and logs all outside the working copy, start at boot, restart on crash,
+reinstallable and uninstallable. The layout follows macOS conventions of its own — code in
+`/usr/local/popopx-service-suite/{src,venv,requirements.lock}`, configuration in
+`/usr/local/etc/popopx-service-suite/env`, state in `/usr/local/var/popopx-service-suite`,
+logs in `/usr/local/var/log/popopx-service-suite/`. The service account is `_popopx` (UID/GID 450,
+shell `/usr/bin/false`) created with `sysadminctl -roleAccount`. `-home` is asked for and **not
+granted**: a role account's `NFSHomeDirectory` is pinned to `/var/empty` whatever is passed —
+`dscl . -read /Users/_popopx NFSHomeDirectory` returns exactly that on the installed machine — so
+the state directory's `_popopx` ownership and 0750 mode come from the installer's own `chown`, and
+the uninstall therefore only ever uses `-keepHome`: with the record pointing at a system
+directory, no flag that deletes a home is acceptable. `--with-node` adds `_popopx-node` (451).
+The install order is the
+one that is safest to interrupt: account → code → directories → venv → env → config gate →
+plist → `launchctl bootstrap`, so a plist that never bootstrapped cannot disturb a running
+deployment, and no path ever deletes the state directory.
+
+Three choices **deliberately diverge from Ubuntu**, and the script prints all three:
+
+1. There is no `--mode docker`. Same reason as `start_macos.sh:10-15` and
+   `docker-compose.yml:19-20`: a container cannot reach this Mac's 127.0.0.1. Shipping a mode
+   known not to start would make the installer a liar.
+2. It binds `127.0.0.1` by default, not Ubuntu's `0.0.0.0`. The application firewall here is
+   off by default, there is no reverse proxy, and the gateway trusts `X-Forwarded-*`
+   unconditionally (uvicorn runs with `forwarded_allow_ips='*'`), so a default `0.0.0.0` means
+   "reachable from the whole LAN the moment it installs". LAN exposure requires an explicit
+   `--lan`, and the script then prints that you either put a reverse proxy in front and let
+   only it set those headers, or you do not use `--lan`. The script never touches a firewall
+   rule.
+3. `src` is installed as `root:wheel 0755` and **deliberately not chowned to the service
+   account** (diverging from `install_ubuntu22.sh:309`): a daemon should not be able to edit
+   its own code. The price is that the logs are private too — launchd creates
+   `gateway.err.log`/`gateway.out.log` under `Umask 077`, owner `_popopx`, mode 0600, so
+   reading them takes sudo, which is the same posture as reading the journal on Ubuntu.
+
+systemd to launchd is a key-by-key translation, not a copy: `User=` → `UserName`/`GroupName`
+(effective only in the system domain, hence a LaunchDaemon and not an agent),
+`WorkingDirectory=` → the same key (it is the only mechanism that makes `-m app.main`
+importable, so no second `PYTHONPATH` is set), `EnvironmentFile=` → **one** entry in
+`EnvironmentVariables`, `POPOPX_ENV_FILE` (process env outranks file values, so putting a port
+or host in the plist would create the second source of truth), `Restart=on-failure` →
+`KeepAlive{SuccessfulExit=false, Crashed=true}`, `RestartSec=3` → `ThrottleInterval=3` (a floor
+on the interval, not a delay), `TimeoutStopSec=15` → `ExitTimeOut=15`. launchd has **no**
+`StartLimitBurst` peer and retries forever, so this suite runs the gateway's own config gate
+(`load_config()`) before `bootstrap`: a config that would refuse to start is caught there
+instead of becoming a crash loop, and `cfg.warnings` get printed — otherwise only
+`GET /api/v1/diagnostics` ever returns them.
+
+Measured offline on this machine: `--help`, `--check` and `--dry-run` (including `--with-node`)
+all exit 0, both plists pass `plutil -lint`, and the dry-run proves with `cksum` that a
+pre-existing env file survives byte-identical with one `.bak.<utc>` added. `brew`'s Python 3.11.18
+passes the interpreter gate, and a venv built from it with `gateway/requirements.txt` actually
+installed measures **2323 checks across 14 groups, exit 0** on `--self-test` (that run also caught
+an HTTP instrument that goes blind only on the newer starlette — see **Self-test** below).
+
+The sudo install that really starts the service **was run on this Mac on 2026-11-22**:
+`/Library/LaunchDaemons/com.popopx.gateway.plist` is on disk (root:wheel 0644), `_popopx` exists
+(UID 450, shell `/usr/bin/false`), `/usr/local/etc/popopx-service-suite/env` is mode 0600 owned by
+`_popopx`, the state and log directories are 0750, and
+`curl http://127.0.0.1:8080/healthz` answers
+`{"ok":true,"node_connected":false,"service_id":"popopx.official"}` — a degraded start with no
+node, which is the path the documentation promises. That install also caught a crash no offline
+run produces: when something on 5225 answers but is not HTTP, `websockets` raises `InvalidMessage`,
+which is a `WebSocketException` and **not** an `OSError`, so it passed straight through the handler
+in `AgentBridge.start()` and took the gateway down with it. After the fix the same situation logs
+one warning, leaves `node_connected` false and retries in the background with capped backoff;
+`strict=True` still raises, and that was verified too.
+
+Not measured yet: whether KeepAlive really pulls a `kill -9`ed process back, and whether `_popopx`
+and `/usr/local/*` are genuinely gone after an uninstall. The node unit likewise stops at
+"generated and linted": what this repository has started on a Mac is the development node in
+`start_macos.sh`; a node running as `_popopx-node` against its own database prefix has never been
+started.
 
 ## Quick start — Ubuntu 22.04 (production)
 
@@ -236,6 +327,19 @@ them with `grep -cE '^[A-Z0-9_]+=' .env.example`);
 `.env` at the repository root, and process environment overrides keys from the file (the
 orchestrator wins).
 
+Both production paths keep that file outside the working copy and **readable only by its
+owner**: Ubuntu's native mode at `/etc/popopx-service-suite/env` (the unit's `EnvironmentFile=`
+line, `install_ubuntu22.sh:326`), macOS at `/usr/local/etc/popopx-service-suite/env`. launchd
+has no `EnvironmentFile=` key, so the plist exports exactly one variable, `POPOPX_ENV_FILE`,
+pointing at it (`config.py:369` honours it), and never a port or an address — process env
+outranks the file's values (`config.py:386-388`), so a second copy in the plist would be a
+source of truth that quietly wins. Both are 0600 owned by the service account, and that is a
+code-level rule rather than documentation style: `_warn_if_world_readable()`
+(`gateway/app/config.py:117-136`) counts **any** bit outside the owner, so a group-readable
+`0640` earns the same warning as a world-readable `0644`, because any group that can read the
+file can read the bearer token inside it — `config.py:858`
+(`a_group_readable_env_file_warns_too`) is the assertion that pins that.
+
 `load_config()` refuses to start with a sentence rather than a traceback when
 `POPOPX_ADMIN_TOKEN` is missing, shorter than 24 characters or still the example value
 (generate with `openssl rand -hex 32`); when `POPOPX_PUBLIC_BASE_URL` is missing — the client
@@ -255,21 +359,42 @@ cd gateway && python3 -m app.main --self-test
 
 The startup path does not run the suite — `create_app()` only runs the route gate
 `assert_routes_are_gated()` (a route the token does not cover should never start listening).
-The full suite is the pre-release entry point, and both launchers print the command as their
-last step.
+The full suite is the pre-release entry point, and the three commands it needs are printed for
+copying as the last step by `start_macos.sh`, `install_macos.sh` and `install_ubuntu22.sh`.
 
-The authoritative count is the last line that command prints. On this machine on 2026-11-21
-only the standard library was available (no `cryptography`, no `fastapi`), and the measured
-result was **2286 checks across 12 groups**: `app.crypto_service.crypto_self_test` (needs
+The authoritative count is the last line that command prints. On this machine on 2026-11-22
+`/usr/bin/python3` has only the standard library (no `cryptography`, no `fastapi`), and the
+measured result was **2289 checks across 12 groups**: `app.crypto_service.crypto_self_test` (needs
 `cryptography`) and `app.main.http_self_test` (needs `fastapi`) were named as `SKIPPED` by the
 runner, which prints "those paths are NOT verified here" — those two groups ran zero checks
 here, which is not the same as having run and not been counted. Re-running on the same machine
-inside a venv that has `gateway/requirements.txt` installed measured **2320 checks across 14
+inside a venv that has `gateway/requirements.txt` installed measured **2323 checks across 14
 groups**, and the difference is exactly those two groups: the runner prints
 `crypto_self_test 6 checks` and `http_self_test 28 checks` per group, and the 14 group figures
-sum to the total line (2286 + 6 + 28 = 2320), so you can audit your own run the same way. One
-caveat: this machine has no 3.11, so both measurements ran on 3.9.6, not on the
-`requirements.txt` target interpreter.
+sum to the total line (2289 + 6 + 28 = 2323), so you can audit your own run the same way. Every
+figure above was re-measured on 2026-11-22: the repository `.venv`'s 3.9.6 (fastapi 0.128.8) and a
+fresh venv built from `brew`'s Python 3.11.18 both measure **2323 checks across 14 groups, exit 0**.
+The second one was not a formality: `requirements.txt` pins ranges, so the new venv resolved
+fastapi 0.165.0 with starlette 1.10.0, and starlette 1.x no longer flattens an
+`include_router()` into `app.routes` — it keeps one nested `_IncludedRouter` in their place.
+Reading the flat list through `isinstance(r, APIRoute)` therefore lost 30 plugin routes and
+reported 39 verb+path pairs as "declared but never mounted", while
+`GET /api/v1/plugins/ai/status` still answered 200 and still appeared in the OpenAPI document.
+The gateway was fine; the instrument was blind, and the routes it could not see were silently
+dropping out of the GET sweep rather than failing it. That check now walks nested routers before
+comparing, and both fastapi versions give the same answer. The falsification control is still
+there: replace `include_router` with a no-op and both versions immediately report
+`every_declared_route_is_actually_mounted`.
+
+The node group (`app.agent_bridge`, now 143 checks) gained 3 in the same version, because the live
+install hit a class the degraded boot did not cover: when something on 5225 answers with bytes that
+are not HTTP, `websockets` raises `InvalidMessage` — a `WebSocketException`, **not** an `OSError` —
+which passed straight through the handler in `AgentBridge.start()` and took the gateway down. Every
+fake in that group raised `ConnectionRefusedError`, which *is* an `OSError`, so the hole survived a
+fully green suite. Those 3 now open a real listener that replies with non-HTTP bytes and let the
+library pick the exception class; the last one asserts that the classes `start()` catches match
+whether or not `websockets` is installed — on a wheel-less machine it asserts the three-class
+fallback rather than skipping, so it cannot quietly read true on the configuration it cannot test.
 
 Assertions cover the protocol layer, database, configuration, billing, cryptography, the node
 bridge, the five plugins, cross-implementation cryptography, and the HTTP group
@@ -280,7 +405,7 @@ tell a mounted route from a route that merely exists in source.
 # Still from the repository root (cd .. if the block above left you in gateway/)
 python3.11 -m venv .venv                      # 3.11 is the suite's target interpreter
 .venv/bin/pip install -r gateway/requirements.txt
-cd gateway && ../.venv/bin/python -m app.main --self-test   # 14 groups green, no SKIPPED (2320 here)
+cd gateway && ../.venv/bin/python -m app.main --self-test   # 14 groups green, no SKIPPED (2323 here)
 ```
 
 ## Cross-implementation crypto check
@@ -336,6 +461,26 @@ same code path the console reads back.
   `/healthz` reported `node_connected: true`. `/_address` got as far as the SMP broker before
   failing, and `detail` carried the node's own words, `errorAgent / BROKER / NETWORK /
   timeoutError` — this sandbox has no SMP egress, so grammar and wiring are not the suspects.
+- What the launchd side **cannot** do (`install_macos.sh` does not pretend otherwise, and its
+  plists carry no key for any of it): there is no peer for `KillSignal=SIGINT` — launchd sends
+  SIGTERM on stop. Uvicorn's `HANDLED_SIGNALS` covers SIGINT and SIGTERM alike
+  (`.venv/.../uvicorn/server.py:32-35`), so the graceful drain still happens; if you really want
+  SIGINT, `sudo launchctl kill SIGINT system/com.popopx.gateway`. There is no peer for
+  `ProtectSystem=strict`, `ReadWritePaths=`, `ProtectHome`, `PrivateTmp`, `NoNewPrivileges` or
+  `RestrictSUIDSGID`; the only substitutes are the dedicated account, `src` staying
+  `root:wheel 0755` (so the service account cannot edit its own code), `Umask 077`, and `TMPDIR`
+  pointed at a 0700 directory inside the state tree. There is no peer for `MemoryMax=768M`:
+  `SoftResourceLimits.ResidentSetSize` exists as a key but Darwin does not enforce RLIMIT_RSS,
+  and `NumberOfFiles` must **not** be set — `launchd.plist(5)` says it writes the global
+  `kern.maxfiles`. There is no peer for `StartLimitBurst`/`StartLimitIntervalSec`: launchd never
+  gives up retrying, and `ThrottleInterval` is only the floor on the gap between attempts, not a
+  `RestartSec` delay — which is the entire reason the config gate runs before `bootstrap`. Do not
+  use `KeepAlive.NetworkState` either; the man page states it is "no longer implemented". There is
+  no journal, only the two `StandardOutPath`/`StandardErrorPath` files, and **this suite does not
+  rotate them**: newsyslog would have to move a file descriptor launchd already holds, so the
+  safe procedure is `mv` followed immediately by
+  `sudo launchctl kickstart -k system/com.popopx.gateway` to make the service reopen its files —
+  that is what the installer's NEXT STEPS prints, not a config that pretends to roll on its own.
 - Not done here: an end-to-end send/receive with a real iOS client (needs a reachable broker),
   and the shape of the successful `userContactLinkCreated` frame — only failure frames were
   available, so `show_contact_address()` treats exactly one case, `userContactLinkNotFound`, as
