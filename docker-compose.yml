@@ -1,0 +1,120 @@
+# Copyright (c) 2026 POPOPX (popopx.chat)
+# SPDX-License-Identifier: AGPL-3.0-only
+# POPOPX Service Suite — production orchestration (Ubuntu 22.04 LTS).
+#
+# ─── Why network_mode: host and not a bridge network ────────────────────────
+# The gateway reaches the open-source node over the node's WebSocket JSON API,
+# and that API binds 127.0.0.1 *only* (`runLocalTCPServer` hardcodes the
+# loopback address, and the CLI starts it solely when --chat-server-port is
+# passed). A Docker DNS name cannot route into another namespace's loopback, so
+# `ws://popopx-node:5225` is unreachable by construction — the pairing that
+# works is both containers sharing the host network namespace, which is also
+# what upstream recommends ("run your bot process on the same machine where you
+# run POPOPX Chat CLI", bots/README.md).
+#
+# Consequences, stated so nobody discovers them at 3am:
+#   * `ports:` would be silently ignored under host networking, so none are
+#     declared. The gateway listens on 0.0.0.0:$POPOPX_GATEWAY_PORT directly.
+#   * Firewalls must be set at the host (ufw), not with EXPOSE.
+#   * host networking is Linux-only. On macOS use ./start_macos.sh, which runs
+#     the gateway in a local virtualenv for exactly this reason.
+#
+# ─── The AGPL seam ───────────────────────────────────────────────────────────
+# `popopx-node` is the open-source messaging node. It is a separate image, a
+# separate container and a separate process; this suite links no code from it
+# and sends it only the WebSocket commands documented in gateway/app/agent_bridge.py.
+# It is behind a profile because most merchants already run their own node
+# (or the Mac Node app) on the host; enabling it is `--profile node`.
+#
+#   docker compose up -d                              # gateway only
+#   docker compose --profile node up -d               # gateway + managed node
+#   docker compose --profile node --profile console up -d
+
+name: popopx-service-suite
+
+services:
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    image: popopx-service-suite-gateway:1
+    container_name: popopx-gateway
+    restart: on-failure:5
+    stop_grace_period: 10s
+    network_mode: host
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      POPOPX_DB_PATH: /var/lib/popopx-service-suite/gateway.db
+      POPOPX_NODE_WS_URL: ${POPOPX_NODE_WS_URL:-ws://127.0.0.1:5225}
+      POPOPX_GATEWAY_HOST: ${POPOPX_GATEWAY_HOST:-0.0.0.0}
+      POPOPX_GATEWAY_PORT: ${POPOPX_GATEWAY_PORT:-8080}
+    volumes:
+      - suite-data:/var/lib/popopx-service-suite
+    # Compose-level liveness: an HTTP GET against /healthz, which reports the
+    # node link state without failing the container while a reconnect is in
+    # progress (start_period absorbs the first SMP handshake).
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:${POPOPX_GATEWAY_PORT:-8080}/healthz >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  node:
+    profiles: ["node"]
+    # No official image is published for the fork. Build it from the checkout
+    # and point POPOPX_NODE_IMAGE at it:
+    #   docker build -t popopx-chat-node:local -f Dockerfile ./popopx-chat
+    image: ${POPOPX_NODE_IMAGE:-popopx-chat-node:local}
+    container_name: popopx-node
+    restart: on-failure:5
+    stop_grace_period: 20s
+    network_mode: host
+    command:
+      - --chat-server-port
+      - ${POPOPX_NODE_CHAT_PORT:-5225}
+      # `-d|--database` is a PATH PREFIX for the chat and agent databases, not a
+      # directory — the real flag, confirmed against `popopx-chat --help`
+      # (default "/root/.popopx/popopx_v1" style). There is no --app-dir.
+      - --database
+      - /var/lib/popopx-node/popopx_v1
+      # A compose service has no TTY to answer a migration prompt with, so the
+      # "up" migration confirmation has to be pre-given. `--headless` is
+      # deliberately NOT used: it requires --relay and turns this into a message
+      # relay, which is a different job from the chat-server API the gateway
+      # connects to.
+      - --yes-migrate
+      # The display name is the second question a first run asks, and in a
+      # container nobody can hear it: stdin is not attached, the read gets EOF
+      # and the node dies with `hGetLine: end of file` in a log most operators
+      # never open. --user-display-name is the documented non-interactive answer
+      # (popopx-chat --help: "Use existing active user with this display name, or
+      # create one on the first start").
+      #
+      # It is NOT safe to leave at the default on a volume that already has a
+      # profile: the node compares the two names and exits on a mismatch
+      # (src/Popopx/Chat/Core.hs:79-82). So when reusing an existing node-data
+      # volume, set POPOPX_NODE_DISPLAY_NAME to the name that profile has.
+      - --user-display-name
+      - ${POPOPX_NODE_DISPLAY_NAME:-POPOPX Service}
+    stdin_open: false
+    volumes:
+      - node-data:/var/lib/popopx-node
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  suite-data:
+    name: popopx-suite-data
+  node-data:
+    name: popopx-node-data

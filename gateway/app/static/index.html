@@ -1,0 +1,3556 @@
+<!--
+  Copyright (c) 2026 POPOPX (popopx.chat)
+  SPDX-License-Identifier: AGPL-3.0-only
+-->
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>POPOPX 服务号管理后台</title>
+<style>
+:root {
+  --bg: #0b0e13;
+  --bg-2: #0e131b;
+  --sec: #111722;
+  --sec-2: #161e2b;
+  --line: #223046;
+  --line-soft: #1a2432;
+  --fg: #dbe4ef;
+  --fg-2: #a8b7c8;
+  --fg-3: #74869b;
+  --brand: #2fbfa0;
+  --brand-2: #1b6d5c;
+  --good: #4bbf7f;
+  --warn: #e0a458;
+  --bad: #e0575f;
+  --info: #63a4e8;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 14px/1.5 var(--sans); -webkit-font-smoothing: antialiased;
+}
+a { color: var(--brand); text-decoration: none; }
+a:hover { text-decoration: underline; }
+h1, h2, h3, h4 { margin: 0; font-weight: 600; letter-spacing: -0.006em; }
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+/* Every flex row that ends with buttons pushes them to the right with this, so it has
+ * to be a global utility: #bar, .row and .result > .rh all use it. */
+.grow { flex: 1; }
+
+/* ── shell ─────────────────────────────────────────────────────────────── */
+#shell { display: none; height: 100%; grid-template-rows: auto 1fr; grid-template-columns: 216px 1fr; }
+#shell.on { display: grid; }
+#bar {
+  grid-column: 1 / 3; display: flex; align-items: center; gap: 14px;
+  padding: 0 16px; height: 50px; background: var(--bg-2);
+  border-bottom: 1px solid var(--line);
+}
+#bar .mark { font-weight: 650; letter-spacing: 0.02em; color: var(--fg); }
+#bar .mark b { color: var(--brand); font-weight: 650; }
+#bar .sep { width: 1px; height: 18px; background: var(--line); }
+#bar .meta { color: var(--fg-3); font-size: 12px; }
+#side {
+  overflow-y: auto; padding: 10px 0 24px; background: var(--bg-2);
+  border-right: 1px solid var(--line);
+}
+#side .grp { padding: 14px 16px 4px; font-size: 10.5px; letter-spacing: 0.1em; color: var(--fg-3); text-transform: uppercase; }
+#side a {
+  display: flex; align-items: center; gap: 8px; padding: 6px 16px;
+  color: var(--fg-2); border-left: 2px solid transparent; font-size: 13.5px;
+}
+#side a:hover { background: var(--sec); color: var(--fg); text-decoration: none; }
+#side a.act { color: var(--fg); background: var(--sec-2); border-left-color: var(--brand); }
+#side a .n { margin-left: auto; font: 11px var(--mono); color: var(--fg-3); }
+#stage { overflow-y: auto; padding: 20px 24px 80px; }
+#stage > .wrap { max-width: 1240px; }
+
+/* ── login ─────────────────────────────────────────────────────────────── */
+#gate { display: flex; align-items: center; justify-content: center; height: 100%; padding: 24px; }
+#gate .box { width: min(460px, 100%); background: var(--sec); border: 1px solid var(--line); border-radius: 8px; padding: 26px; }
+#gate h1 { font-size: 19px; margin-bottom: 4px; }
+#gate p { margin: 0 0 18px; color: var(--fg-3); font-size: 12.5px; }
+#gate .err { margin-top: 12px; font-size: 12.5px; color: var(--bad); min-height: 18px; }
+
+/* ── sections ──────────────────────────────────────────────────────────── */
+.sec { background: var(--sec); border: 1px solid var(--line); border-radius: 8px; margin-bottom: 16px; overflow: hidden; }
+.sec > header {
+  display: flex; align-items: baseline; gap: 10px; padding: 12px 16px;
+  border-bottom: 1px solid var(--line-soft); background: var(--sec-2);
+}
+.sec > header h3 { font-size: 14px; }
+.sec > header .note { color: var(--fg-3); font-size: 11.5px; }
+.sec > header .right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+.sbody { padding: 14px 16px 16px; }
+.sbody > * + * { margin-top: 12px; }
+h4.sub { font-size: 12px; color: var(--fg-2); letter-spacing: 0.02em; margin: 18px 0 8px; padding-top: 12px; border-top: 1px dashed var(--line-soft); }
+h4.sub:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+.split { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px 14px; }
+.grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px 14px; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.row.end { justify-content: flex-end; }
+.empty { color: var(--fg-3); font-size: 12.5px; margin: 2px 0 0; font-style: italic; }
+.hint { color: var(--fg-3); font-size: 11.5px; }
+.warnline { color: var(--warn); font-size: 12px; }
+
+/* ── controls ──────────────────────────────────────────────────────────── */
+.in {
+  width: 100%; padding: 6px 9px; color: var(--fg); background: var(--bg-2);
+  border: 1px solid var(--line); border-radius: 5px; font: 13px var(--sans);
+}
+textarea.in { font-family: var(--mono); font-size: 12.5px; line-height: 1.45; resize: vertical; }
+.in.mono { font-family: var(--mono); font-size: 12.5px; }
+.in.mini { width: auto; min-width: 120px; }
+.in:focus { outline: none; border-color: var(--brand-2); box-shadow: 0 0 0 2px rgba(47,191,160,0.14); }
+select.in { appearance: none; padding-right: 24px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--fg-3) 50%), linear-gradient(135deg, var(--fg-3) 50%, transparent 50%);
+  background-position: right 12px top 13px, right 8px top 13px; background-size: 4px 4px; background-repeat: no-repeat; }
+.in[disabled] { opacity: 0.5; }
+label.fld { display: block; }
+label.fld > span.fl { display: block; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--fg-3); margin-bottom: 4px; }
+label.fld > span.fh { display: block; font-size: 11px; color: var(--fg-3); margin-top: 4px; }
+label.ck { display: flex; gap: 7px; align-items: center; font-size: 12.5px; color: var(--fg-2); }
+label.ck input { accent-color: var(--brand); margin: 0; }
+.btn {
+  padding: 6px 12px; border: 1px solid var(--line); border-radius: 5px;
+  background: var(--sec-2); color: var(--fg); font: 12.5px var(--sans); cursor: pointer;
+}
+.btn:hover:not(:disabled) { border-color: var(--brand-2); background: #1a2432; }
+.btn:disabled { opacity: 0.45; cursor: default; }
+.btn.pri { background: var(--brand-2); border-color: #228a74; color: #eafffa; }
+.btn.pri:hover:not(:disabled) { background: #249071; }
+.btn.dan { border-color: #5a2b30; color: #f0b6ba; }
+.btn.dan:hover:not(:disabled) { background: #2a1719; border-color: var(--bad); }
+.btn.mini { padding: 3px 8px; font-size: 11.5px; }
+.btn.gho { background: transparent; }
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 12px; }
+.tabs button {
+  padding: 6px 11px; border: 0; border-bottom: 2px solid transparent; background: none;
+  color: var(--fg-3); font: 12.5px var(--sans); cursor: pointer;
+}
+.tabs button.act { color: var(--fg); border-bottom-color: var(--brand); }
+
+/* ── tables ────────────────────────────────────────────────────────────── */
+.twrap { overflow-x: auto; border: 1px solid var(--line-soft); border-radius: 6px; }
+table.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+table.tbl th {
+  text-align: left; padding: 7px 10px; font-size: 10.5px; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--fg-3); background: var(--bg-2);
+  border-bottom: 1px solid var(--line); white-space: nowrap;
+}
+table.tbl td { padding: 7px 10px; border-bottom: 1px solid var(--line-soft); vertical-align: middle; }
+table.tbl tr:last-child td { border-bottom: 0; }
+table.tbl tbody tr:hover td { background: #141c28; }
+td.nil, .nil { color: #4a586c; }
+.kv { display: grid; grid-template-columns: 148px 1fr; gap: 5px 12px; font-size: 12.5px; }
+.kv > dt { color: var(--fg-3); }
+.kv > dd { margin: 0; word-break: break-word; }
+pre.dump {
+  margin: 0; padding: 10px 12px; max-height: 340px; overflow: auto;
+  background: #080b10; border: 1px solid var(--line-soft); border-radius: 6px;
+  font: 11.5px/1.5 var(--mono); color: #b9c8da; white-space: pre-wrap; word-break: break-word;
+}
+code.mono { font-family: var(--mono); font-size: 12px; color: #c8d6e6; word-break: break-all; }
+.chip {
+  display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: 10px;
+  border: 1px solid var(--line); background: var(--bg-2); font-size: 11px; color: var(--fg-2);
+}
+.chip.g { border-color: #245c3d; color: #96dcb3; }
+.chip.w { border-color: #5d4820; color: #eac489; }
+.chip.b { border-color: #5a2b30; color: #efa7ac; }
+.chip.i { border-color: #24486b; color: #9cc6f2; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg-3); display: inline-block; }
+.dot.g { background: var(--good); box-shadow: 0 0 0 3px rgba(75,191,127,0.16); }
+.dot.b { background: var(--bad); }
+.dot.w { background: var(--warn); }
+.bar { height: 5px; border-radius: 3px; background: var(--line-soft); overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--brand-2); }
+.count { font: 11px var(--mono); color: var(--fg-3); }
+.count.over { color: var(--bad); }
+.result { border: 1px solid var(--line-soft); border-radius: 6px; background: var(--bg-2); }
+.result > .rh {
+  display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-bottom: 1px solid var(--line-soft);
+  font-size: 11.5px; color: var(--fg-3);
+}
+.result > .rh b { color: var(--fg-2); font-weight: 500; font-size: 12px; }
+.result > .rb { padding: 0; }
+.result > .rb pre.dump { border: 0; border-radius: 0; max-height: 280px; }
+.errbox { padding: 10px 12px; border: 1px solid #4b2429; border-radius: 6px; background: #1d1215; }
+.errbox .em { color: #f2b8bc; font-size: 12.5px; }
+.errbox .ec { font-family: var(--mono); font-size: 11.5px; color: #d59aa0; }
+.errbox pre.dump { margin-top: 8px; background: #150e11; border-color: #3a2126; }
+#toast { position: fixed; right: 18px; bottom: 18px; display: flex; flex-direction: column; gap: 8px; z-index: 60; }
+#toast div {
+  padding: 9px 13px; border-radius: 6px; border: 1px solid var(--line); background: var(--sec-2);
+  font-size: 12.5px; box-shadow: 0 8px 26px rgba(0,0,0,0.42); max-width: 380px;
+}
+#toast div.bad { border-color: #5a2b30; }
+#toast div.good { border-color: #245c3d; }
+.reps { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+.rep { border: 1px solid var(--line-soft); border-radius: 6px; padding: 10px 12px; background: var(--bg-2); }
+.rep .rl { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--fg-3); }
+.rep .rv { font: 600 21px/1.25 var(--mono); margin-top: 3px; }
+.rep .rs { font-size: 11.5px; color: var(--fg-3); }
+.item { border: 1px solid var(--line); border-radius: 6px; background: var(--sec-2); padding: 10px 12px; }
+.item + .item { margin-top: 8px; }
+.item .ih { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.item .ih .t { font-weight: 600; font-size: 13px; }
+.item .ih .sp { margin-left: auto; display: flex; gap: 4px; }
+.item .in + .in, .item .fld + .fld { margin-top: 7px; }
+.subs { margin: 8px 0 0 14px; padding-left: 10px; border-left: 1px dashed var(--line); }
+@media (max-width: 980px) {
+  #shell { grid-template-columns: 1fr; }
+  #side { display: none; }
+  #bar { grid-column: 1; }
+  .split { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<div id="gate">
+  <form class="box" id="gateform" autocomplete="off">
+    <h1>POPOPX 服务号管理后台</h1>
+    <p>管理令牌即 <code class="mono">POPOPX_ADMIN_TOKEN</code>，只在浏览器内存与本次会话中保存；请求以 <code class="mono">x-admin-token</code> 与 <code class="mono">Authorization</code> 两种头部发送。</p>
+    <label class="fld"><span class="fl">管理令牌</span><input class="in mono" id="tokin" type="password" placeholder="sk-popopx-…" autocomplete="off"></label>
+    <div class="row" style="margin-top:14px">
+      <button class="btn pri" type="submit" id="tokgo">进入控制台</button>
+      <button class="btn" type="button" id="tokping">检查连通</button>
+      <span class="hint" id="tokbase"></span>
+    </div>
+    <div class="err" id="tokerr"></div>
+  </form>
+</div>
+
+<div id="shell">
+  <div id="bar">
+    <a class="mark" id="markhome" title="回到控制台首页"><b>POPOPX</b> 服务号</a>
+    <span class="sep"></span>
+    <span id="barsvc" class="meta">—</span>
+    <span class="grow"></span>
+    <span id="barbill" class="chip">计费 —</span>
+    <span id="barnode" class="chip"><i class="dot"></i>节点 —</span>
+    <button class="btn mini gho" type="button" id="barref">刷新</button>
+    <button class="btn mini gho" type="button" id="barout">退出</button>
+  </div>
+  <nav id="side"></nav>
+  <main id="stage"><div class="wrap" id="view"></div></main>
+</div>
+
+<div id="toast"></div>
+
+<script>
+"use strict";
+(function () {
+/* ======================================================================== *
+ * 1. 协议词汇表 —— 与 app/crypto_service.py、app/main.py 同源，改动必须同步
+ * ======================================================================== */
+
+var LIMITS = {
+  frame_chars: 8192, card_id: 64, card_title: 120, card_body: 2000,
+  field_label: 80, field_value: 240, payload: 512, url: 2048,
+  max_fields: 8, max_actions: 4, max_menu_items: 3, max_menu_subitems: 5,
+  max_menu_title_chars: 80, progress_min: 0, progress_max: 100,
+  credits_min: 1, credits_max: 100000, secret_hex_chars: 64,
+  pairwise_uid: 128, service_id: 128, max_epoch: 1000000
+};
+
+var MENU_ITEM_KINDS = ["click", "view", "scancode", "location", "click_text"];
+var MENU_ACTION_KINDS = ["open_url", "send_cmd", "open_channel", "callback"];
+var CARD_ACTION_KINDS = ["callback", "pay_credits", "open_url", "open_channel", "send_cmd"];
+var ACTION_STYLES = ["primary", "secondary", "destructive"];
+var CARD_STYLES = ["standard", "receipt", "security"];
+var CARD_STATES = ["draft", "sent", "delivered", "settled", "failed"];
+var ALERT_SEVERITY = ["silent", "debug", "info", "warning", "critical"];
+var ALERT_STATUS = ["firing", "acknowledged", "resolved"];
+var SSO_STATE = ["pending", "scanned", "confirmed", "delivered", "expired", "cancelled"];
+var VOUCHER_STATUS = ["issued", "redeemed", "revoked", "expired"];
+var POLL_MODES = ["anonymous", "signed"];
+var WEB3_CHAINS = ["evm", "solana"];
+
+/* 中文标签，只影响显示，不影响任何线上值。 */
+var L = {
+  card_state: { draft: "草稿", sent: "已发送", delivered: "已送达", settled: "已完成", failed: "失败" },
+  alert_status: { firing: "待确认", acknowledged: "已确认", resolved: "已解决" },
+  alert_severity: { silent: "静默", debug: "调试", info: "提示", warning: "警告", critical: "严重" },
+  sso_state: { pending: "等待扫码", scanned: "已扫码", confirmed: "已确认", delivered: "已签发", expired: "已过期", cancelled: "已取消" },
+  voucher_status: { issued: "未兑换", redeemed: "已兑换", revoked: "已作废", expired: "已过期" },
+  billing_status: { DRAFT: "未激活（准入模式）", ONLINE: "在线", SUSPENDED: "已停用" },
+  poll_state: { open: "进行中", closed: "已结束" },
+  member_status: { active: "有效", revoked: "已收回", expired: "已过期" }
+};
+function lab(group, v) { var m = L[group]; return (m && m[v]) || v || "—"; }
+
+/* 全部 HTTP 表面积。`main.py::self_test()` 会逐条比对服务端注册的路由，
+ * 因此这张表要么与网关一致，要么启动自检直接失败。表里的每一项都必须真的被
+ * call() 调用：不被调用的路径写在这里只会让比对多算一项、少发现一处漂移。 */
+var API = {
+  /* —— 探针 —— */
+  healthz:      ["GET", "/healthz"],
+
+  /* —— 总览与节点 —— */
+  status:       ["GET", "/api/v1/status"],
+  nodeAddress:  ["POST", "/api/v1/node/address"],
+  nodeAccept:   ["POST", "/api/v1/node/accept"],
+  nodeContacts: ["GET", "/api/v1/node/contacts"],
+  nodeProfile:  ["PUT", "/api/v1/node/profile"],
+  sendText:     ["POST", "/api/v1/send/text"],
+
+  /* —— 联系人 —— */
+  contacts:     ["GET", "/api/v1/contacts"],
+  contactsSync: ["POST", "/api/v1/contacts/sync"],
+  handshake:    ["POST", "/api/v1/contacts/{contact_id}/handshake"],
+  revokeSession:["DELETE", "/api/v1/contacts/{contact_id}/session"],
+
+  /* —— 菜单 —— */
+  menuGet:      ["GET", "/api/v1/menu"],
+  menuSet:      ["POST", "/api/v1/menu"],
+  menuPush:     ["POST", "/api/v1/menu/push"],
+
+  /* —— 卡片 —— */
+  cards:        ["GET", "/api/v1/cards"],
+  cardSend:     ["POST", "/api/v1/cards"],
+  cardGet:      ["GET", "/api/v1/cards/{card_id}"],
+  cardUpdate:   ["POST", "/api/v1/cards/{card_id}/update"],
+  cardSettle:   ["POST", "/api/v1/cards/{card_id}/settle"],
+
+  /* —— 频道 —— */
+  channels:     ["GET", "/api/v1/channels"],
+  channelCreate:["POST", "/api/v1/channels"],
+  channelGet:   ["GET", "/api/v1/channels/{channel_id}"],
+  channelUri:   ["PUT", "/api/v1/channels/{channel_id}/uri"],
+  channelRotate:["POST", "/api/v1/channels/{channel_id}/rotate"],
+  members:      ["GET", "/api/v1/channels/{channel_id}/members"],
+  memberGrant:  ["POST", "/api/v1/channels/{channel_id}/members"],
+  memberRevoke: ["DELETE", "/api/v1/channels/{channel_id}/members/{contact_id}"],
+
+  /* —— 图文 —— */
+  articles:     ["GET", "/api/v1/articles"],
+  articlePut:   ["PUT", "/api/v1/articles/{article_id}"],
+  articleGet:   ["GET", "/api/v1/articles/{article_id}"],
+  articleSend:  ["POST", "/api/v1/articles/{article_id}/send"],
+
+  /* —— 计费与激活码 —— */
+  account:      ["GET", "/api/v1/billing/account"],
+  ledger:       ["GET", "/api/v1/billing/ledger"],
+  billingOnline:["POST", "/api/v1/billing/online"],
+  billingSuspend:["POST", "/api/v1/billing/suspend"],
+  billingGrant: ["POST", "/api/v1/billing/grant"],
+  vouchers:     ["GET", "/api/v1/vouchers"],
+  voucherVerify:["POST", "/api/v1/vouchers/verify"],
+  voucherRedeem:["POST", "/api/v1/vouchers/redeem"],
+  h5Auth:       ["POST", "/api/v1/verifyH5Auth"],
+
+  /* —— 运维 —— */
+  plugins:      ["GET", "/api/v1/plugins"],
+  pluginStatus: ["GET", "/api/v1/plugins/{plugin_id}/status"],
+  callbacks:    ["GET", "/api/v1/callbacks"],
+  outbox:       ["GET", "/api/v1/outbox"],
+  outboxDrain:  ["POST", "/api/v1/outbox/drain"],
+  outboxDelete: ["DELETE", "/api/v1/outbox/{outbox_id}"],
+  outboxRetry:  ["POST", "/api/v1/outbox/{outbox_id}/retry"],
+  settings:     ["GET", "/api/v1/settings"],
+  settingPut:   ["PUT", "/api/v1/settings/{key}"],
+  diagnostics:  ["GET", "/api/v1/diagnostics"],
+
+  /* —— 插件：AI 客服 —— */
+  aiStatus:     ["GET", "/api/v1/plugins/ai/status"],
+  aiChat:       ["POST", "/api/v1/plugins/ai/chat"],
+  aiHistory:    ["GET", "/api/v1/plugins/ai/history"],
+  aiHistoryDel: ["DELETE", "/api/v1/plugins/ai/history"],
+  aiConfigure:  ["POST", "/api/v1/plugins/ai/configure"],
+  aiExport:     ["GET", "/api/v1/plugins/ai/transcript/{contact_id}/export"],
+
+  /* —— 插件：告警运营 —— */
+  alertsStatus: ["GET", "/api/v1/plugins/alerts/status"],
+  alertList:    ["GET", "/api/v1/plugins/alerts"],
+  alertGet:     ["GET", "/api/v1/plugins/alerts/{alert_id}"],
+  alertAck:     ["POST", "/api/v1/plugins/alerts/{alert_id}/ack"],
+  alertResolve: ["POST", "/api/v1/plugins/alerts/{alert_id}/resolve"],
+  alertTargets: ["GET", "/api/v1/plugins/alerts/targets"],
+  alertTargetsSet:["POST", "/api/v1/plugins/alerts/targets"],
+  alertTargetsDel:["DELETE", "/api/v1/plugins/alerts/targets"],
+  alertWebhook: ["POST", "/api/v1/plugins/alerts/webhook"],
+
+  /* —— 插件：免密登录 —— */
+  ssoStatus:    ["GET", "/api/v1/plugins/sso/status"],
+  ssoCreate:    ["POST", "/api/v1/plugins/sso/sessions"],
+  ssoGet:       ["GET", "/api/v1/plugins/sso/sessions/{session_id}"],
+  ssoCancel:    ["POST", "/api/v1/plugins/sso/sessions/{session_id}/cancel"],
+  ssoVerify:    ["POST", "/api/v1/plugins/sso/verify"],
+  ssoAudit:     ["GET", "/api/v1/plugins/sso/audit"],
+
+  /* —— 插件：投票 —— */
+  pollsStatus:  ["GET", "/api/v1/plugins/polls/status"],
+  pollsCreate:  ["POST", "/api/v1/plugins/polls"],
+  pollsList:    ["GET", "/api/v1/plugins/polls"],
+  pollGet:      ["GET", "/api/v1/plugins/polls/{poll_id}"],
+  pollResults:  ["GET", "/api/v1/plugins/polls/{poll_id}/results"],
+  pollClose:    ["POST", "/api/v1/plugins/polls/{poll_id}/close"],
+  pollReopen:   ["POST", "/api/v1/plugins/polls/{poll_id}/reopen"],
+  pollRefresh:  ["POST", "/api/v1/plugins/polls/{poll_id}/refresh"],
+
+  /* —— 插件：Web3 —— */
+  web3Status:   ["GET", "/api/v1/plugins/web3/status"],
+  web3Watchers: ["GET", "/api/v1/plugins/web3/watchers"],
+  web3WatcherAdd:["POST", "/api/v1/plugins/web3/watchers"],
+  web3WatcherPatch:["PATCH", "/api/v1/plugins/web3/watchers/{watch_id}"],
+  web3WatcherDel:["DELETE", "/api/v1/plugins/web3/watchers/{watch_id}"],
+  web3Whitelist:["GET", "/api/v1/plugins/web3/whitelist"],
+  web3WhitelistAdd:["POST", "/api/v1/plugins/web3/whitelist"],
+  web3WhitelistDel:["DELETE", "/api/v1/plugins/web3/whitelist"],
+  web3Events:   ["GET", "/api/v1/plugins/web3/events"]
+};
+
+/* 导航目标：不由 fetch 调用，而是拼成链接交给浏览器/手机打开。
+ * 路径同样必须是服务端真实注册的，否则运营点开的是一条 404。 */
+var LINKS = {
+  home:    ["GET", "/"],
+  h5:      ["GET", "/h5/{article_id}"]
+};
+
+var PLUGINS = [
+  { key: "ai",     id: "ai_agent",     name: "AI 客服",   meter: "ai_message", prefix: "/api/v1/plugins/ai" },
+  { key: "alerts", id: "alert_ops",    name: "告警运营",  meter: "alert",      prefix: "/api/v1/plugins/alerts" },
+  { key: "sso",    id: "privacy_sso",  name: "免密登录",  meter: "sso_login",  prefix: "/api/v1/plugins/sso" },
+  { key: "polls",  id: "polls",        name: "投票",      meter: "poll",       prefix: "/api/v1/plugins/polls" },
+  { key: "web3",   id: "web3_bridge",  name: "Web3 桥",   meter: "web3_event", prefix: "/api/v1/plugins/web3" }
+];
+
+var NAV = [
+  { grp: "概览", items: [{ k: "overview", n: "总览" }] },
+  { grp: "账号与粉丝", items: [
+      { k: "node", n: "服务号与节点" },
+      { k: "contacts", n: "联系人" }
+  ] },
+  { grp: "内容与触达", items: [
+      { k: "menu", n: "菜单编排" },
+      { k: "cards", n: "卡片下发" },
+      { k: "articles", n: "图文与 H5" }
+  ] },
+  { grp: "频道", items: [{ k: "channels", n: "频道与密钥轮换" }] },
+  { grp: "计费", items: [
+      { k: "billing", n: "账户与流水" },
+      { k: "vouchers", n: "算力激活码" }
+  ] },
+  { grp: "插件控制台", items: [
+      { k: "ai", n: "AI 客服" },
+      { k: "alerts", n: "告警运营" },
+      { k: "sso", n: "免密登录" },
+      { k: "polls", n: "投票" },
+      { k: "web3", n: "Web3 桥" }
+  ] },
+  { grp: "运维", items: [
+      { k: "outbox", n: "出站队列" },
+      { k: "callbacks", n: "回调" },
+      { k: "settings", n: "设置" },
+      { k: "diagnostics", n: "诊断" }
+  ] }
+];
+
+/* ======================================================================== *
+ * 2. DOM 与格式化
+ * ======================================================================== */
+
+var $ = function (id) { return document.getElementById(id); };
+
+function append(node, kid) {
+  if (kid === null || kid === undefined || kid === false || kid === "") return;
+  if (Array.isArray(kid)) { for (var i = 0; i < kid.length; i++) append(node, kid[i]); return; }
+  if (kid instanceof Node) { node.appendChild(kid); return; }
+  node.appendChild(document.createTextNode(String(kid)));
+}
+
+function h(tag, props) {
+  var node = document.createElement(tag);
+  if (props && typeof props === "object" && !(props instanceof Node) && !Array.isArray(props)) {
+    for (var k in props) {
+      var v = props[k];
+      if (v === null || v === undefined || v === false) continue;
+      if (k === "text") { node.textContent = String(v); continue; }
+      if (k === "class") { node.className = v; continue; }
+      if (k === "style") { node.setAttribute("style", v); continue; }
+      if (k === "on") { for (var ev in v) node.addEventListener(ev, v[ev]); continue; }
+      if (k === "data") { for (var d in v) node.setAttribute("data-" + d, v[d]); continue; }
+      if (Object.prototype.hasOwnProperty.call(node, k) && k !== "list") { node[k] = v; continue; }
+      node.setAttribute(k, v);
+    }
+  } else {
+    append(node, props);
+  }
+  for (var i = 2; i < arguments.length; i++) append(node, arguments[i]);
+  return node;
+}
+function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); return node; }
+function frag() { return document.createDocumentFragment(); }
+
+function dash(v) { return (v === null || v === undefined || v === "") ? h("span", { class: "nil", text: "—" }) : String(v); }
+
+function pad(n, w) { var s = String(n); while (s.length < w) s = "0" + s; return s; }
+function localDate(ms) {
+  var d = new Date(ms);
+  return d.getFullYear() + "-" + pad(d.getMonth() + 1, 2) + "-" + pad(d.getDate(), 2) +
+         " " + pad(d.getHours(), 2) + ":" + pad(d.getMinutes(), 2) + ":" + pad(d.getSeconds(), 2);
+}
+function ms(v) {
+  var n = Number(v);
+  if (!isFinite(n) || n <= 0) return h("span", { class: "nil", text: "—" });
+  return h("span", { class: "num", title: localDate(n) + "（本地）", text: localDate(n).slice(0, 16) });
+}
+function ago(v) {
+  var n = Number(v);
+  if (!isFinite(n) || n <= 0) return "—";
+  var s = Math.max(0, Math.round((Date.now() - n) / 1000));
+  if (s < 45) return s + " 秒前";
+  if (s < 3600) return Math.round(s / 60) + " 分钟前";
+  if (s < 86400) return Math.round(s / 3600) + " 小时前";
+  if (s < 86400 * 30) return Math.round(s / 86400) + " 天前";
+  return localDate(n).slice(0, 10);
+}
+function inOrAgo(v) {
+  var n = Number(v);
+  if (!isFinite(n) || n <= 0) return "—";
+  return n > Date.now() ? "还剩 " + rel(n - Date.now()) : ago(n);
+}
+function rel(deltaMs) {
+  var s = Math.round(Math.abs(deltaMs) / 1000);
+  if (s < 60) return s + " 秒";
+  if (s < 3600) return Math.round(s / 60) + " 分钟";
+  if (s < 86400) return (s / 3600).toFixed(1) + " 小时";
+  return (s / 86400).toFixed(1) + " 天";
+}
+function n(v) { var x = Number(v); return isFinite(x) ? x : 0; }
+function fmtInt(v) { var x = n(v); return x.toLocaleString("zh-CN"); }
+function cr(v) { return fmtInt(v) + " POPX-CP"; }
+function short(s, head, tail) {
+  s = String(s === null || s === undefined ? "" : s);
+  head = head || 10; tail = (tail === undefined) ? 6 : tail;
+  if (s.length <= head + tail + 1) return s;
+  return s.slice(0, head) + "…" + s.slice(s.length - tail);
+}
+function bytes(v) {
+  var x = n(v);
+  if (x < 1024) return x + " B";
+  if (x < 1048576) return (x / 1024).toFixed(1) + " KiB";
+  return (x / 1048576).toFixed(2) + " MiB";
+}
+function dump(obj) {
+  var s;
+  try { s = JSON.stringify(obj, null, 2); } catch (e) { s = String(obj); }
+  return s === undefined ? "null" : s;
+}
+function pretty(obj, cls) { return h("pre", { class: "dump " + (cls || ""), text: typeof obj === "string" ? obj : dump(obj) }); }
+
+function toLocalInput(msVal) {
+  var x = n(msVal);
+  if (!x) return "";
+  var d = new Date(x);
+  return d.getFullYear() + "-" + pad(d.getMonth() + 1, 2) + "-" + pad(d.getDate(), 2) + "T" +
+         pad(d.getHours(), 2) + ":" + pad(d.getMinutes(), 2);
+}
+function fromLocalInput(s) {
+  s = String(s || "").trim();
+  if (!s) return null;
+  var t = new Date(s).getTime();
+  return isFinite(t) ? t : null;
+}
+
+/* ======================================================================== *
+ * 3. 网络层：统一处理四种错误信封
+ * ======================================================================== */
+
+var STATE = {
+  token: "",
+  status: null,
+  account: null,
+  plugins: [],
+  contacts: [],
+  channels: [],
+  meters: {},
+  freshContacts: 0
+};
+
+function headers(extra) {
+  var out = { "accept": "application/json" };
+  if (STATE.token) {
+    /* 网关核心与插件中间件读 x-admin-token；alert_ops 的控制台路由读
+     * X-Popopx-Admin-Token，privacy_sso 的 /verify、/audit 读 Authorization。
+     * 三个头部同时发送，一个令牌不需要按路由切换。 */
+    out["x-admin-token"] = STATE.token;
+    out["X-Popopx-Admin-Token"] = STATE.token;
+    out["authorization"] = "Bearer " + STATE.token;
+  }
+  /* 少数接口有独立令牌（告警 webhook 的 POPOPX_ALERT_WEBHOOK_TOKEN），
+   * 允许逐次覆盖或撤掉上面的默认头部。 */
+  if (extra) for (var k in extra) {
+    if (extra[k] === null || extra[k] === undefined) delete out[k];
+    else out[k] = extra[k];
+  }
+  return out;
+}
+
+function fill(tpl, params) {
+  params = params || {};
+  return String(tpl).replace(/\{([a-z_]+)\}/gi, function (all, key) {
+    if (!(key in params)) throw new Error("路径 " + tpl + " 缺少参数 " + key);
+    return encodeURIComponent(String(params[key]));
+  });
+}
+/* 导航链接的唯一来源：路径只写在 LINKS 表里，启动自检会逐条比对服务端注册的路由。
+ * 任何一处手写 "/h5/…" 都会绕过这道比对，所以一处也不许写。 */
+function pageUrl(key, params) {
+  var entry = LINKS[key];
+  if (!entry) throw new Error("控制台导航表里没有 " + key);
+  return fill(entry[1], params || {});
+}
+function linkTo(key, text, params, attrs) {
+  var props = { href: pageUrl(key, params), target: "_blank", rel: "noopener noreferrer" };
+  if (attrs) { for (var k in attrs) { props[k] = attrs[k]; } }
+  props.text = String(text);
+  return h("a", props);
+}
+function query(o) {
+  if (!o) return "";
+  var parts = [];
+  for (var k in o) {
+    var v = o[k];
+    if (v === null || v === undefined || v === "") continue;
+    if (Array.isArray(v)) { for (var i = 0; i < v.length; i++) parts.push(encodeURIComponent(k) + "=" + encodeURIComponent(v[i])); continue; }
+    parts.push(encodeURIComponent(k) + "=" + encodeURIComponent(v));
+  }
+  return parts.length ? "?" + parts.join("&") : "";
+}
+
+function ApiError(message, info) {
+  this.name = "ApiError";
+  this.message = message;
+  for (var k in info) this[k] = info[k];
+}
+ApiError.prototype = Object.create(Error.prototype);
+ApiError.prototype.constructor = ApiError;
+
+function describe(status, data, text) {
+  var out = { status: status, code: "", detail: "", payload: null };
+  if (data && typeof data === "object") {
+    var d = data.detail;
+    if (d && typeof d === "object" && !Array.isArray(d)) {
+      out.payload = d;
+      out.code = String(d.error || d.reason || data.error || "");
+      out.detail = String(d.detail || d.message || "");
+    } else if (Array.isArray(d)) {
+      /* FastAPI 的 422：[{loc, msg, type}] */
+      out.code = "request_invalid";
+      out.detail = d.map(function (i) { return ((i.loc || []).slice(1).join(".") || (i.loc || [])[0] || "?") + "：" + (i.msg || ""); }).join("；");
+    } else if (typeof d === "string") {
+      out.code = String(data.error || data.reason || "");
+      out.detail = d;
+    } else {
+      out.code = String(data.error || data.reason || "");
+      out.detail = String(data.message || "");
+    }
+  } else {
+    out.detail = String(text || "").slice(0, 500);
+  }
+  if (status === 401 && !out.code) out.code = "unauthorized";
+  if (out.code === "unauthorized") out.detail = "管理令牌缺失或不正确（POPOPX_ADMIN_TOKEN）。";
+  out.message = (out.code ? out.code + " · " : "") + (out.detail || ("HTTP " + status));
+  return out;
+}
+
+async function call(key, o) {
+  o = o || {};
+  var spec = API[key];
+  if (!spec) throw new ApiError("控制台 API 表缺少键 " + key, { status: 0, code: "console_bug" });
+  var method = spec[0], path = fill(spec[1], o.params), url = path + query(o.query);
+  var init = { method: method, headers: headers(o.headers), credentials: "same-origin" };
+  if (method !== "GET" && method !== "HEAD") {
+    init.headers["content-type"] = "application/json";
+    init.body = JSON.stringify(o.body === undefined ? {} : o.body);
+  }
+  var res, text = "", data = null;
+  try {
+    res = await fetch(url, init);
+  } catch (e) {
+    throw new ApiError("无法连接网关：" + e.message + "（同源部署，请确认本页面由 gateway 自身提供）",
+      { status: 0, code: "network" });
+  }
+  try { text = await res.text(); } catch (e) { text = ""; }
+  if (o.raw) return { status: res.status, ok: res.ok, text: text, type: res.headers.get("content-type") || "" };
+  try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
+  if (!res.ok) {
+    var info = describe(res.status, data, text);
+    throw new ApiError(info.message, info);
+  }
+  if (data === null && text) return text;
+  return data;
+}
+
+/* ======================================================================== *
+ * 4. 通用组件
+ * ======================================================================== */
+
+function toast(message, tone) {
+  var box = h("div", { class: tone || "", text: message });
+  $("toast").appendChild(box);
+  setTimeout(function () { box.style.opacity = "0"; box.style.transition = "opacity .3s"; }, 2600);
+  setTimeout(function () { if (box.parentNode) box.parentNode.removeChild(box); }, 3000);
+}
+
+function section(title, note, actions) {
+  var body = h("div", { class: "sbody" });
+  var right = h("div", { class: "right" });
+  if (actions) append(right, actions);
+  var node = h("section", { class: "sec" },
+    h("header", {}, h("h3", { text: title }), note ? h("span", { class: "note", text: note }) : null, right),
+    body);
+  return { node: node, body: body };
+}
+
+function inp(props) { return h("input", Object.assign({ class: "in" }, props || {})); }
+function area(props) { return h("textarea", Object.assign({ class: "in", rows: 4 }, props || {})); }
+function sel(options, props) {
+  var node = h("select", Object.assign({ class: "in" }, props || {}));
+  options.forEach(function (opt) {
+    var pair = Array.isArray(opt) ? opt : [opt, opt];
+    node.appendChild(h("option", { value: String(pair[0]), text: String(pair[1]) }));
+  });
+  return node;
+}
+function chk(label, on) {
+  var box = h("input", { type: "checkbox" });
+  box.checked = !!on;
+  return { node: h("label", { class: "ck" }, box, h("span", { text: label })), box: box,
+           get: function () { return box.checked; }, set: function (v) { box.checked = !!v; } };
+}
+function field(label, control, hint) {
+  return h("label", { class: "fld" }, h("span", { class: "fl", text: label }), control,
+    hint ? h("span", { class: "fh", text: hint }) : null);
+}
+function chip(text, tone) { return h("span", { class: "chip " + (tone || ""), text: String(text) }); }
+function dot(state) { return h("i", { class: "dot " + (state === true ? "g" : state === false ? "b" : state || "") }); }
+function counter(input, max) {
+  var node = h("span", { class: "count", text: "0/" + max });
+  var bump = function () {
+    var len = String(input.value || "").length;
+    node.textContent = len + "/" + max;
+    node.className = "count" + (len > max ? " over" : "");
+  };
+  input.addEventListener("input", bump);
+  setTimeout(bump, 0);
+  return node;
+}
+function btn(label, fn, o) {
+  o = o || {};
+  var node = h("button", { class: "btn " + (o.tone || ""), type: "button", text: label });
+  node.addEventListener("click", function () {
+    if (o.confirm && !window.confirm(o.confirm)) return;
+    var host = o.out ? o.out() : null;
+    node.disabled = true;
+    var keep = node.textContent;
+    node.textContent = "处理中…";
+    Promise.resolve().then(fn).then(function (res) {
+      if (host) renderResult(host, label, res);
+      if (o.done) o.done(res);
+    }, function (e) {
+      if (host) renderError(host, e); else toast((e && e.message) || String(e), "bad");
+    }).then(function () { node.disabled = false; node.textContent = keep; });
+  });
+  return node;
+}
+function renderResult(host, title, res) {
+  clear(host);
+  if (res instanceof Node) { host.appendChild(res); return; }
+  if (res === undefined || res === null) { host.appendChild(h("p", { class: "hint", text: title + "：完成" })); return; }
+  host.appendChild(resultBox(title, res));
+}
+function resultBox(title, payload) {
+  var pre = pretty(payload);
+  var node = h("div", { class: "result" },
+    h("div", { class: "rh" }, h("b", { text: title }), h("span", { class: "grow" }),
+      btn("复制", function () { return copyText(dump(payload)).then(function (m) { toast(m, "good"); }); }, { tone: "mini" }),
+      btn("折叠", function () { pre.style.display = pre.style.display === "none" ? "" : "none"; return null; }, { tone: "mini gho" })),
+    h("div", { class: "rb" }, pre));
+  return node;
+}
+function renderError(host, e) {
+  var box = h("div", { class: "errbox" },
+    h("div", { class: "em", text: (e && e.message) || String(e) }),
+    (e && e.status) ? h("div", { class: "ec", text: "HTTP " + e.status + (e.code ? " · " + e.code : "") }) : null,
+    (e && e.payload) ? pretty(e.payload) : null);
+  if (host) { clear(host); host.appendChild(box); } else clear(host);
+}
+function copyText(text) {
+  text = String(text);
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(text).then(function () { return "已复制"; });
+  }
+  return new Promise(function (resolve, reject) {
+    var ta = h("textarea", { class: "in", style: "position:fixed;left:-9999px;top:0" });
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    var ok = false;
+    try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+    document.body.removeChild(ta);
+    ok ? resolve("已复制") : reject(new Error("浏览器拒绝了复制请求，请手动选中"));
+  });
+}
+function copyBtn(get, label) {
+  return btn(label || "复制", function () {
+    var v = get();
+    if (!v) { toast("没有可复制的内容", "bad"); return null; }
+    return copyText(v).then(function (m) { toast(m, "good"); });
+  }, { tone: "mini" });
+}
+function linkMono(text, href) {
+  return h("a", { class: "mono", href: href || text, target: "_blank", rel: "noopener noreferrer", text: text || "—" });
+}
+function tableOf(cols, rows, empty) {
+  if (!rows || !rows.length) return h("p", { class: "empty", text: empty || "（无数据）" });
+  var head = h("tr", {}, cols.map(function (c) { return h("th", { text: c.label }); }));
+  var body = rows.map(function (row, i) {
+    return h("tr", {}, cols.map(function (c) {
+      var v = c.get ? c.get(row, i) : row[c.k];
+      var cell = h("td", { class: c.cls || "" });
+      append(cell, (v === null || v === undefined || v === "") ? h("span", { class: "nil", text: "—" }) : v);
+      return cell;
+    }));
+  });
+  return h("div", { class: "twrap" }, h("table", { class: "tbl" }, h("thead", {}, head), h("tbody", {}, body)));
+}
+function kv(pairs) {
+  var node = h("dl", { class: "kv" });
+  pairs.forEach(function (p) {
+    if (!p) return;
+    node.appendChild(h("dt", { text: p[0] }));
+    var dd = h("dd");
+    append(dd, p[1] === null || p[1] === undefined || p[1] === "" ? h("span", { class: "nil", text: "—" }) : p[1]);
+    node.appendChild(dd);
+  });
+  return node;
+}
+function rest(original, known) {
+  /* 未预期的标量字段照原样列出，服务端加了字段时控制台不会看不见。 */
+  var out = [];
+  for (var k in original) {
+    if (known.indexOf(k) >= 0) continue;
+    var v = original[k];
+    if (v === null || typeof v === "number" || typeof v === "string" || typeof v === "boolean") out.push([k, String(v)]);
+    else out.push([k, pretty(v)]);
+  }
+  return out;
+}
+function statCard(label, value, sub) {
+  return h("div", { class: "rep" }, h("div", { class: "rl", text: label }),
+    h("div", { class: "rv num", text: value }), sub ? h("div", { class: "rs", text: sub }) : null);
+}
+function bar(pct, tone) {
+  var w = Math.max(0, Math.min(100, n(pct)));
+  return h("div", { class: "bar", title: w + "%" }, h("i", { style: "width:" + w + "%" + (tone ? ";background:" + tone : "") }));
+}
+function parseJsonField(v, fallback) {
+  if (v === null || v === undefined || v === "") return fallback;
+  if (typeof v === "object") return v;
+  try { return JSON.parse(String(v)); } catch (e) { return fallback === undefined ? String(v) : fallback; }
+}
+
+/* 收件人选择：网关的 contact_ids_from() 接受 all_contacts / contact_ids / contact_id。 */
+function targetsBox(o) {
+  o = o || {};
+  var all = o.explicit ? null : chk("全部联系人（按人数计费）", false);
+  var filter = inp({ class: "in mini", placeholder: "筛选名称或编号", type: "search" });
+  var list = h("select", { class: "in", size: "8", multiple: true });
+  var box = h("div", {},
+    h("div", { class: "row", style: "margin-bottom:7px" },
+      all ? all.node : h("span", { class: "hint", text: "仅发送给下方明确选中的联系人" }),
+      h("span", { class: "grow" }),
+      btn("全选", function () { selectAll(true); return null; }, { tone: "mini gho" }),
+      btn("清空", function () { selectAll(false); return null; }, { tone: "mini gho" }),
+      h("span", { class: "count", id: "tpick" })),
+    list);
+  if (all) box.insertBefore(h("div", {}, all.node), box.firstChild);
+  var shown = [];
+  function render() {
+    clear(list);
+    var q = String(filter.value || "").trim().toLowerCase();
+    shown = STATE.contacts.filter(function (c) {
+      if (!q) return true;
+      return (String(c.display_name || "") + " " + String(c.local_display_name || "") + " " + c.contact_id + " " + (c.pairwise_uid || "")).toLowerCase().indexOf(q) >= 0;
+    });
+    shown.forEach(function (c) {
+      var name = c.local_display_name || c.display_name || ("联系人 " + c.contact_id);
+      list.appendChild(h("option", { value: String(c.contact_id), text: "#" + c.contact_id + "  " + name + (c.revoked ? "（会话已撤销）" : "") }));
+    });
+    if (!shown.length) list.appendChild(h("option", { value: "0", disabled: true, text: "（没有匹配的联系人）" }));
+    tally();
+  }
+  function tally() {
+    var box2 = $("tpick");
+    if (box2) box2.textContent = ids().length + " / " + shown.length + " 已选";
+  }
+  function selectAll(on) {
+    Array.prototype.forEach.call(list.options, function (op) { if (op.value !== "0") op.selected = on; });
+    if (all) all.set(false);
+    tally();
+  }
+  function ids() {
+    return Array.prototype.filter.call(list.options, function (op) { return op.selected && op.value !== "0"; })
+      .map(function (op) { return Number(op.value); });
+  }
+  list.addEventListener("change", tally);
+  filter.addEventListener("input", render);
+  if (all) all.box.addEventListener("change", tally);
+  render();
+  return {
+    node: box, ids: ids,
+    /* 返回可直接展开进请求体的目标字段 */
+    body: function () {
+      if (all && all.get()) return { all_contacts: true };
+      return { contact_ids: ids() };
+    },
+    listBody: function () { return { targets: ids() }; },
+    reload: render,
+    count: function () { return all && all.get() ? STATE.contacts.length : ids().length; }
+  };
+}
+
+/* ======================================================================== *
+ * 5. 数据缓存与外壳
+ * ======================================================================== */
+
+async function loadStatus() {
+  STATE.status = await call("status");
+  STATE.plugins = (STATE.status && STATE.status.plugins) || [];
+  return STATE.status;
+}
+async function loadAccount() {
+  var data = await call("account");
+  STATE.account = data.account;
+  STATE.meters = (data.summary && data.summary.meters) || {};
+  return data;
+}
+async function loadContacts(force) {
+  if (!force && STATE.freshContacts && (Date.now() - STATE.freshContacts < 60000)) return STATE.contacts;
+  var data = await call("contacts");
+  STATE.contacts = data.contacts || [];
+  STATE.freshContacts = Date.now();
+  return STATE.contacts;
+}
+async function loadChannels(force) {
+  if (!force && STATE.channels.length && (Date.now() - (STATE.channelsAt || 0) < 60000)) return STATE.channels;
+  var data = await call("channels");
+  STATE.channels = data.channels || [];
+  STATE.channelsAt = Date.now();
+  return STATE.channels;
+}
+function meter(name) { return n(STATE.meters[name]); }
+function pluginMeta(key) {
+  for (var i = 0; i < PLUGINS.length; i++) if (PLUGINS[i].key === key) return PLUGINS[i];
+  return null;
+}
+function pluginRow(key) {
+  var meta = pluginMeta(key);
+  var rows = STATE.plugins || [];
+  for (var i = 0; i < rows.length; i++) if (rows[i].plugin_id === meta.id) return rows[i];
+  return null;
+}
+var GATE_REASONS = {
+  usable: "可用",
+  disabled: "已关闭",
+  credit_fused: "算力熔断",
+  account_suspended: "账户停用",
+  account_draft: "账户未激活（仅准入模式）",
+  node_unreachable: "节点离线"
+};
+function fuseOf(key) {
+  var row = pluginRow(key);
+  var gate = (row && row.gate) || {};
+  return { mounted: !!(row && row.available), usable: !!gate.ok, reason: gate.reason || "",
+           label: GATE_REASONS[gate.reason] || gate.reason || "未知",
+           detail: gate.detail || "", balance: gate.balance, error: (row && row.error) || "" };
+}
+
+function paintBar() {
+  var st = STATE.status || {}, svc = st.service || {}, node = st.node || {}, bill = st.billing || {};
+  $("barsvc").textContent = (svc.display_name || "POPOPX 服务号") + " · " + (svc.service_id || "—");
+  var on = !!node.connected;
+  clear($("barnode"));
+  $("barnode").appendChild(dot(on));
+  $("barnode").appendChild(h("span", { text: "节点 " + (on ? "在线" : "离线") }));
+  $("barnode").className = "chip " + (on ? "g" : "b");
+  var sum = STATE.account ? STATE.account.balance : (bill.balance);
+  clear($("barbill"));
+  $("barbill").appendChild(h("span", { text: "算力 " + fmtInt(sum) }));
+  $("barbill").className = "chip " + (bill.status === "SUSPENDED" ? "b" : bill.status === "ONLINE" ? "g" : "w");
+  $("barbill").title = "账户状态 " + lab("billing_status", bill.status || "ONLINE") + " · 余额以 POPX-CP 计";
+}
+
+function paintSide() {
+  var side = clear($("side"));
+  NAV.forEach(function (group) {
+    side.appendChild(h("div", { class: "grp", text: group.grp }));
+    group.items.forEach(function (item) {
+      var a = h("a", { href: "#" + item.k, "data-k": item.k }, h("span", { text: item.n }));
+      var badge = sideBadge(item.k);
+      if (badge) a.appendChild(h("span", { class: "n", text: badge }));
+      side.appendChild(a);
+    });
+  });
+}
+function sideBadge(key) {
+  var st = STATE.status || {}, counts = st.counts || {}, out = st.outbox || {};
+  if (key === "contacts") return counts.contacts ? String(counts.contacts) : "";
+  if (key === "cards") return counts.cards ? String(counts.cards) : "";
+  if (key === "channels") return counts.channels ? String(counts.channels) : "";
+  if (key === "outbox") return n(out.failed) ? "!" + out.failed : (n(out.queued) ? String(out.queued) : "");
+  if (key === "callbacks") return counts.callbacks ? String(counts.callbacks) : "";
+  var meta = pluginMeta(key);
+  if (meta) { var f = fuseOf(meta.key); return f.mounted ? (f.usable ? "" : "停") : "未装"; }
+  return "";
+}
+
+function markActive(key) {
+  Array.prototype.forEach.call(document.querySelectorAll("#side a"), function (a) {
+    a.className = a.getAttribute("data-k") === key ? "act" : "";
+  });
+}
+
+var VIEWS = {};
+var currentTimer = null;
+function stopTimer() { if (currentTimer) { clearInterval(currentTimer); currentTimer = null; } }
+
+function route() {
+  var key = (location.hash || "#overview").slice(1);
+  if (!VIEWS[key]) key = "overview";
+  markActive(key);
+  stopTimer();
+  var host = clear($("view"));
+  try {
+    VIEWS[key](host);
+  } catch (e) {
+    host.appendChild(h("p", { class: "warnline", text: "面板初始化失败：" + e.message }));
+  }
+  $("stage").scrollTop = 0;
+}
+
+function every(msVal, fn) {
+  fn();
+  currentTimer = setInterval(function () { if (document.hidden) return; fn(); }, msVal);
+  return function () { clearInterval(currentTimer); currentTimer = null; };
+}
+
+/* ======================================================================== *
+ * 6. 登录
+ * ======================================================================== */
+
+function tokenSave(value) {
+  STATE.token = value;
+  try { sessionStorage.setItem("popopx.admin.token", value); } catch (e) { /* 隐私模式：仅本次内存 */ }
+}
+
+function showShell() {
+  $("gate").style.display = "none";
+  $("shell").className = "on";
+  $("markhome").href = pageUrl("home");
+  paintSide();
+  route();
+}
+function showGate(message) {
+  stopTimer();
+  $("shell").className = "";
+  $("gate").style.display = "flex";
+  $("tokerr").textContent = message || "";
+  $("tokin").focus();
+}
+
+async function boot(token) {
+  tokenSave(token);
+  try {
+    await loadStatus();
+    await loadAccount();
+    await loadContacts();
+  } catch (e) {
+    if (e.status === 401) { tokenSave(""); showGate(e.message); return false; }
+    /* 令牌可用但网关半死：仍然进入，面板各自报错。 */
+    toast("网关状态读取失败：" + e.message, "bad");
+  }
+  paintBar();
+  paintSide();
+  showShell();
+  return true;
+}
+
+$("gateform").addEventListener("submit", function (ev) {
+  ev.preventDefault();
+  var value = String($("tokin").value || "").trim();
+  if (!value) { $("tokerr").textContent = "请填写管理令牌。"; return; }
+  var go = $("tokgo");
+  go.disabled = true; go.textContent = "连接中…";
+  $("tokerr").textContent = "";
+  boot(value).then(function (ok) { if (!ok) { /* 已回到登录页 */ } }, function (e) { $("tokerr").textContent = e.message; })
+    .then(function () { go.disabled = false; go.textContent = "进入控制台"; });
+});
+
+/* 先分清「网关没起来」和「令牌不对」：/healthz 不要管理令牌，
+ * 少了这一步，端口写错和令牌写错在界面上是同一句话。 */
+$("tokping").addEventListener("click", function () {
+  var go = $("tokping"), box = $("tokerr");
+  go.disabled = true; go.textContent = "探测中…";
+  box.className = "hint";
+  box.textContent = "";
+  call("healthz").then(function (r) {
+    box.className = "hint";
+    box.textContent = "网关在线：" + JSON.stringify(r);
+  }, function (e) {
+    box.className = "err";
+    box.textContent = e.status ? ("网关有响应但异常（HTTP " + e.status + "）：" + e.message)
+                               : ("连不上网关：" + e.message + "（检查端口与 start_macos.sh 的输出）");
+  }).then(function () { go.disabled = false; go.textContent = "检查连通"; });
+});
+
+$("barref").addEventListener("click", function () {
+  loadStatus().then(loadAccount).then(function () { paintBar(); paintSide(); route(); toast("已刷新", "good"); })
+    .catch(function (e) { toast(e.message, "bad"); });
+});
+$("barout").addEventListener("click", function () {
+  tokenSave("");
+  STATE.status = null; STATE.account = null; STATE.contacts = []; STATE.channels = [];
+  showGate("");
+});
+
+/* ======================================================================== *
+ * 6a. 总览、服务号与节点、联系人
+ * ======================================================================== */
+
+VIEWS.overview = function (host) {
+  var svcS = section("服务号", "网关的身份与对外地址", [btn("重新读取", function () { return refresh(); }, { out: function () { return host; }, tone: "mini" })]);
+  var nodeS = section("节点链路", "与本机 SimpleX 节点的 ws 通道");
+  var billS = section("算力", "POPX-CP：默认开箱即用；兑换即入账，开启准入后耗尽即熔断插件");
+  var reachS = section("触达与存储", "各表行数取自 GET /api/v1/status 的 counts");
+  var plugS = section("插件", "五个插件的装载、开关与熔断状态", [btn("插件详情", function () { location.hash = "#ai"; return null; }, { tone: "mini gho" })]);
+  [svcS, nodeS, billS, reachS, plugS].forEach(function (s) { host.appendChild(s.node); });
+
+  async function refresh() {
+    await loadStatus();
+    var data;
+    try { data = await call("account"); } catch (e) { data = null; }
+    paintBar(); paintSide();
+
+    var st = STATE.status || {}, svc = st.service || {}, node = st.node || {}, out = st.outbox || {};
+    clear(svcS.body);
+    svcS.body.appendChild(kv([
+      ["service_id", h("span", { class: "mono", text: svc.service_id || "—" })],
+      ["显示名", svc.display_name],
+      ["对外地址", h("a", { href: svc.public_base_url, target: "_blank", rel: "noopener noreferrer", class: "mono", text: svc.public_base_url || "—" })],
+      ["联系人地址", h("div", { class: "row" }, h("code", { class: "mono", text: svc.contact_address || "尚未申请" }),
+        svc.contact_address ? copyBtn(function () { return svc.contact_address; }) : null)],
+      ["网关版本", st.version],
+      ["节点 ws", node.ws_url]
+    ]));
+    if (!svc.contact_address) svcS.body.appendChild(h("p", { class: "warnline", text: "还没有可扫描的联系人地址：到「服务号与节点」申请一个。" }));
+
+    clear(nodeS.body);
+    var known = ["connected", "ws_url", "user_id", "contact_address", "pending_commands"];
+    var rows = [["连接", chip(node.connected ? "在线" : "离线", node.connected ? "g" : "b")]]
+      .concat(known.slice(1).map(function (k) { return [k, String(node[k] === undefined ? "—" : node[k])]; }))
+      .concat(rest(node, known));
+    nodeS.body.appendChild(kv(rows));
+
+    clear(billS.body);
+    var acc = (data && data.account) || {}, sum = (data && data.summary) || {};
+    billS.body.appendChild(h("div", { class: "reps" },
+      statCard("余额", fmtInt(acc.balance), cr(acc.balance)),
+      statCard("累计兑换", fmtInt(acc.lifetime_granted), "lifetime_granted"),
+      statCard("累计消耗", fmtInt(acc.lifetime_spent), "lifetime_spent"),
+      statCard("流水行数", fmtInt(sum.ledger_rows), "billing_ledger")));
+    billS.body.appendChild(kv([
+      ["账户状态", chip(lab("billing_status", acc.status || "ONLINE"), acc.status === "ONLINE" ? "g" : acc.status === "SUSPENDED" ? "b" : "w")],
+      ["可否计费", acc.is_chargeable ? "可" : "否"],
+      ["计量价目", Object.keys(STATE.meters).sort().map(function (k) { return h("span", { class: "chip", text: k + " " + STATE.meters[k] }); })],
+      ["对账", sum.ledger_balanced === false ? chip("余额与流水不平，见诊断", "b") : "balance == granted − spent"]
+    ]));
+
+    clear(reachS.body);
+    reachS.body.appendChild(h("div", { class: "grid3" },
+      statCard("联系人", fmtInt(countOf("contacts")), "会话 " + fmtInt(countOf("eco_sessions"))),
+      statCard("卡片", fmtInt(countOf("cards")), "按钮 " + fmtInt(countOf("card_actions"))),
+      statCard("频道", fmtInt(countOf("channels")), "成员 " + fmtInt(countOf("channel_members"))),
+      statCard("回调", fmtInt(countOf("callbacks")), "未匹配见「回调」"),
+      statCard("待发送", fmtInt(out.queued), out.oldest_queued_ms ? "最早 " + ago(out.oldest_queued_ms) : "队列为空"),
+      statCard("失败", fmtInt(out.failed), "abandoned " + fmtInt(out.abandoned))));
+
+    clear(plugS.body);
+    var line = h("div", { class: "row" });
+    function paintChips(rows) {
+      clear(line);
+      (rows || []).forEach(function (p) {
+        var gate = p.gate || {};
+        var tone = !p.available ? "b" : gate.ok ? "g" : "w";
+        var label = (p.plugin_id || "?") + "：" + (!p.available ? "未装载" : gate.ok ? "可用" : "停止");
+        line.appendChild(chip(label, tone));
+        if (!p.available && p.error) line.appendChild(chip("装载错误", "b"));
+      });
+      if (!(rows || []).length) line.appendChild(h("span", { class: "hint", text: "注册表为空：五大插件都没装载。" }));
+    }
+    paintChips(STATE.plugins);
+    plugS.body.appendChild(h("div", { class: "row" },
+      /* 直接读注册表而不是复用 status 里的副本：改了 POPOPX_PLUGIN_* 并重启后，
+       * 这里能立刻确认网关到底装了什么，而不是等前端缓存。 */
+      btn("重新读取插件注册表", function () {
+        return call("plugins").then(function (r) {
+          STATE.plugins = r.plugins || [];
+          paintChips(STATE.plugins);
+          paintSide();
+          return r;
+        });
+      }, { tone: "mini gho" })));
+    plugS.body.appendChild(line);
+    plugS.body.appendChild(h("p", { class: "hint", text: "「停止」可能是运营关闭，也可能是算力熔断；插件控制台会分别显示原因。" }));
+    return null;
+  }
+  every(15000, function () { refresh().catch(function (e) { toast(e.message, "bad"); }); });
+  refresh().catch(function (e) { renderError(host, e); });
+};
+
+VIEWS.node = function (host) {
+  var idS = section("服务号身份", "地址即 iPhone 扫描的那串文本");
+  var profS = section("显示名", "PUT /api/v1/node/profile 改写节点侧的资料");
+  var accS = section("接受联系人申请", "服务号不会自动通过；打开自动接受可省去这一步");
+  var txtS = section("发送文本", "协议里的 text 帧，用于系统通知与人工回复");
+  [idS, profS, accS, txtS].forEach(function (s) { host.appendChild(s.node); });
+
+  var out1 = h("div"), out2 = h("div"), out3 = h("div"), out4 = h("div");
+
+  var nameIn = inp({ placeholder: "服务号显示名" });
+  var fullIn = inp({ placeholder: "完整名称（可选）" });
+  profS.body.appendChild(h("div", { class: "grid2" }, field("display_name", nameIn), field("full_name", fullIn)));
+  profS.body.appendChild(h("div", { class: "row" },
+    btn("保存资料", function () { return call("nodeProfile", { body: { display_name: nameIn.value, full_name: fullIn.value } }).then(function (r) { out2.appendChild(resultBox("已保存", r)); }); }, { out: function () { return out2; }, tone: "pri" }),
+    h("span", { class: "hint", text: "空字符串表示不修改该字段。" })), out2);
+
+  var reqIn = inp({ class: "in mono", placeholder: "contact_request_id（可在节点客户端复制）" });
+  var reqName = inp({ placeholder: "备注名（可选）" });
+  accS.body.appendChild(h("div", { class: "grid2" },
+    field("contact_request_id", reqIn), field("display_name", reqName)));
+  accS.body.appendChild(h("div", { class: "row" },
+    btn("接受", function () {
+      return call("nodeAccept", { body: { contact_request_id: reqIn.value.trim(), display_name: reqName.value } })
+        .then(function (r) { out3.appendChild(resultBox("已接受", r)); return loadContacts(true); });
+    }, { out: function () { return out3; } }),
+    btn("列出节点待处理申请", function () { return call("nodeContacts").then(function (r) { out3.appendChild(resultBox("节点联系人", r)); }); }, { out: function () { return out3; }, tone: "gho" }),
+    h("span", { class: "hint", text: "自动接受开关在「设置」里。" })), out3);
+
+  var pick = targetsBox({ explicit: true });
+  var msgIn = area({ rows: 3, placeholder: "文本内容（不使用 ECO 前缀，按纯文本发送）" });
+  txtS.body.appendChild(field("收件人", pick.node, "本接口一次只发给一个联系人；多人请用「卡片下发」。"));
+  var oneSel = sel([["0", "（先选择上方联系人）"]], {});
+  txtS.body.appendChild(oneSel);
+  pick.node.addEventListener("change", function () {
+    var ids = pick.ids();
+    clear(oneSel);
+    ids.forEach(function (id) { oneSel.appendChild(h("option", { value: String(id), text: "#" + id })); });
+    if (!ids.length) oneSel.appendChild(h("option", { value: "0", text: "（未选择）" }));
+  });
+  txtS.body.appendChild(h("div", { class: "fld" }, field("内容", msgIn)));
+  txtS.body.appendChild(h("div", { class: "row" },
+    btn("发送", function () {
+      var id = Number(oneSel.value);
+      if (!id) throw new ApiError("请先选择收件人", { status: 0, code: "no_target" });
+      return call("sendText", { body: { contact_id: id, text: msgIn.value } }).then(function (r) {
+        out4.appendChild(resultBox("发送结果", r));
+        if (r && r.queued) toast("节点当前不可达，已入队等待", "warnline");
+      });
+    }, { out: function () { return out4; }, tone: "pri" })), out4);
+
+  async function refreshId() {
+    await loadStatus();
+    var svc = (STATE.status || {}).service || {};
+    clear(idS.body);
+    idS.body.appendChild(kv([
+      ["service_id", h("span", { class: "mono", text: svc.service_id })],
+      ["显示名", svc.display_name],
+      ["对外地址", h("a", { href: svc.public_base_url, target: "_blank", rel: "noopener noreferrer", class: "mono", text: svc.public_base_url })],
+      ["联系人地址", h("div", { class: "row" }, h("code", { class: "mono", text: svc.contact_address || "（未申请）" }),
+        svc.contact_address ? copyBtn(function () { return svc.contact_address; }) : null)]
+    ]));
+    var row = h("div", { class: "row" });
+    row.appendChild(btn("申请/复用地址", function () {
+      return call("nodeAddress", { body: {} }).then(function (r) {
+        out1.appendChild(resultBox("地址", r));
+        return loadStatus().then(function () { refreshId(); paintBar(); });
+      });
+    }, { out: function () { return out1; }, tone: "pri" }));
+    row.appendChild(btn("轮换地址", function () {
+      return call("nodeAddress", { body: { rotate: true } }).then(function (r) {
+        out1.appendChild(resultBox("已轮换", r));
+        return loadStatus().then(function () { refreshId(); });
+      });
+    }, { out: function () { return out1; }, tone: "dan",
+         confirm: "轮换会废弃当前地址：旧联系人仍然保留，但新用户无法再用旧地址添加。确认轮换？" }));
+    row.appendChild(h("span", { class: "hint", text: "轮换只影响添加方式，不影响既有会话密钥（那在「联系人」里逐人操作）。" }));
+    idS.body.appendChild(row);
+    idS.body.appendChild(out1);
+  }
+  refreshId().catch(function (e) { renderError(host, e); });
+};
+
+VIEWS.contacts = function (host) {
+  var tool = h("div", { class: "row" });
+  var s = section("联系人", "会话密钥永不出现在此表；撤销后需要重新握手才能收消息", tool);
+  host.appendChild(s.node);
+  var out = h("div");
+  s.body.appendChild(out);
+
+  var filter = inp({ class: "in mini", placeholder: "筛选名称、编号或 pairwise uid", type: "search" });
+  var onlyLive = chk("只看有活动会话", false);
+  tool.appendChild(filter);
+  tool.appendChild(onlyLive.node);
+  tool.appendChild(btn("同步", function () {
+    return call("contactsSync").then(function (r) {
+      out.appendChild(resultBox("节点同步", r));
+      return loadContacts(true).then(refresh);
+    });
+  }, { out: function () { return out; }, tone: "mini" }));
+  tool.appendChild(btn("刷新", function () { return loadContacts(true).then(refresh); }, { out: function () { return out; }, tone: "mini gho" }));
+
+  var cols = [
+    { label: "#", k: "contact_id", cls: "num" },
+    { label: "名称", get: function (r) { return r.local_display_name || r.display_name || h("span", { class: "nil", text: "未命名" }); } },
+    { label: "pairwise uid", get: function (r) { return h("span", { class: "mono", title: r.pairwise_uid, text: short(r.pairwise_uid, 12, 6) }); } },
+    { label: "会话", get: function (r) {
+        if (!r.service_id) return chip("无会话", "w");
+        if (r.revoked) return chip("已撤销", "b");
+        return chip("有效", "g");
+      } },
+    { label: "首次", get: function (r) { return ago(r.first_seen_ms); } },
+    { label: "最近", get: function (r) { return ago(r.last_seen_ms); } },
+    { label: "密钥轮换", get: function (r) { return r.rotated_at_ms ? localDate(r.rotated_at_ms).slice(0, 16) : h("span", { class: "nil", text: "从未" }); } },
+    { label: "操作", get: function (r) {
+        var box = h("div", { class: "row" });
+        box.appendChild(btn("重新握手", function () {
+          return call("handshake", { params: { contact_id: r.contact_id }, body: { rotate: true } })
+            .then(function (res) { out.appendChild(resultBox("重新握手 #" + r.contact_id, res)); return loadContacts(true).then(refresh); });
+        }, { out: function () { return out; }, tone: "mini",
+             confirm: "轮换密钥后，此前签发的 H5 链接会失效。确认对 #" + r.contact_id + " 执行？" }));
+        if (!r.revoked && r.service_id) {
+          box.appendChild(btn("撤销会话", function () {
+            return call("revokeSession", { params: { contact_id: r.contact_id } })
+              .then(function (res) { out.appendChild(resultBox("撤销", res)); return loadContacts(true).then(refresh); });
+          }, { out: function () { return out; }, tone: "mini dan",
+               confirm: "撤销后该联系人无法解密新消息，直到重新握手。确认撤销 #" + r.contact_id + "？" }));
+        }
+        box.appendChild(copyBtn(function () { return r.pairwise_uid; }, "复制 uid"));
+        return box;
+      } }
+  ];
+
+  function refresh() {
+    var q = String(filter.value || "").trim().toLowerCase();
+    var rows = STATE.contacts.filter(function (c) {
+      if (onlyLive.get() && (!c.service_id || c.revoked)) return false;
+      if (!q) return true;
+      return (String(c.display_name || "") + " " + String(c.local_display_name || "") + " " + c.contact_id + " " + (c.pairwise_uid || "")).toLowerCase().indexOf(q) >= 0;
+    });
+    clear(out);
+    out.appendChild(tableOf(cols, rows, "还没有联系人。iPhone 添加服务号后会出现，或点「同步」从节点拉取。"));
+  }
+  filter.addEventListener("input", refresh);
+  onlyLive.box.addEventListener("change", refresh);
+  loadContacts().then(refresh, function (e) { renderError(out, e); });
+};
+
+/* ======================================================================== *
+ * 6b. 菜单可视化编排
+ * ======================================================================== */
+
+function emptyMenuItem() { return { title: "", kind: "click", action: "", payload: "", url: "", sub: [] }; }
+
+function menuFromWire(items) {
+  return (items || []).map(function (it) {
+    return {
+      title: String(it.title || ""),
+      kind: String(it.kind || "click"),
+      action: typeof it.action === "string" ? it.action : (it.action && it.action.action) || "",
+      payload: String(it.payload || (it.action && it.action.payload) || ""),
+      url: String(it.url || (it.action && it.action.url) || ""),
+      sub: menuFromWire(it.sub || [])
+    };
+  });
+}
+function menuToWire(list) {
+  return (list || []).map(function (it) {
+    var out = { title: it.title, kind: it.kind };
+    if (it.kind === "view") { out.action = "open_url"; out.url = it.url; out.sub = []; return out; }
+    if (it.action) {
+      out.action = it.action;
+      if (it.action === "open_url") out.url = it.url;
+      else if (it.action === "open_channel") out.payload = it.payload;
+      else if (it.action === "send_cmd" || it.action === "callback") out.payload = it.payload;
+    }
+    out.sub = menuToWire(it.sub);
+    return out;
+  });
+}
+function menuProblems(list, top) {
+  var bad = [];
+  if (top && (!list || !list.length)) bad.push("菜单至少要有一个顶级项。");
+  if (list && list.length > LIMITS.max_menu_items) bad.push("顶级项 " + list.length + " 个，客户端上限 " + LIMITS.max_menu_items + " 个。");
+  var seen = {};
+  (list || []).forEach(function (it, i) {
+    var tag = (top ? "顶级项 " : "子项 ") + (i + 1);
+    if (!String(it.title || "").trim()) bad.push(tag + "：标题为空。");
+    if (String(it.title || "").length > LIMITS.max_menu_title_chars) bad.push(tag + "：标题超过 " + LIMITS.max_menu_title_chars + " 字符。");
+    if (top) {
+      if (seen[it.title]) bad.push(tag + "：标题与前面某项重复，客户端按标题唯一。");
+      seen[it.title] = true;
+    }
+    if (MENU_ITEM_KINDS.indexOf(it.kind) < 0) bad.push(tag + "：未知类型 " + it.kind + "。");
+    if (it.kind === "view") {
+      if (!/^https?:\/\//i.test(it.url || "")) bad.push(tag + "：类型 view 需要 http(s) 链接。");
+      if (it.sub && it.sub.length) bad.push(tag + "：类型 view 不允许子菜单。");
+    } else if (it.kind === "scancode" || it.kind === "location") {
+      if (it.action) bad.push(tag + "：类型 " + it.kind + " 由客户端本地处理，不能带动作。");
+    } else if (it.action) {
+      if (MENU_ACTION_KINDS.indexOf(it.action) < 0) bad.push(tag + "：菜单动作只能是 " + MENU_ACTION_KINDS.join("/") + "（收款必须走卡片）。");
+      if (it.action === "open_url" && !/^https?:\/\//i.test(it.url || "")) bad.push(tag + "：open_url 需要 http(s) 链接。");
+      if (it.action === "open_channel" && !/^popopx:\/\//i.test(it.payload || "")) bad.push(tag + "：open_channel 的 payload 必须是频道公开 URI（popopx://…）。");
+      if ((it.action === "callback" || it.action === "send_cmd") && !String(it.payload || "").trim()) bad.push(tag + "：动作 " + it.action + " 需要 payload。");
+      if (String(it.payload || "").length > LIMITS.payload) bad.push(tag + "：payload 超过 " + LIMITS.payload + " 字符。");
+      if (String(it.url || "").length > LIMITS.url) bad.push(tag + "：url 超过 " + LIMITS.url + " 字符。");
+    }
+    if (it.sub && it.sub.length > LIMITS.max_menu_subitems) bad.push(tag + "：子项 " + it.sub.length + " 个，上限 " + LIMITS.max_menu_subitems + " 个。");
+    if (it.sub && it.sub.length) bad = bad.concat(menuProblems(it.sub, false));
+  });
+  return bad;
+}
+
+VIEWS.menu = function (host) {
+  var liveS = section("当前线上菜单", "GET /api/v1/menu 的存储值");
+  var edS = section("编排", "改动只在本页，按下「保存」才会写入网关；保存即生成新的 revision");
+  var chkS = section("客户端规则自检", "与服务端 build_menu 同源，命中任何一条都不会发出");
+  var pushS = section("推送", "菜单帧只发给有活动会话的联系人");
+  [liveS, edS, chkS, pushS].forEach(function (x) { host.appendChild(x.node); });
+
+  var model = [];
+  var meta = {};
+  var listHost = h("div");
+  edS.body.appendChild(listHost);
+  edS.body.appendChild(h("div", { class: "row" },
+    btn("添加顶级项", function () { if (model.length >= LIMITS.max_menu_items) toast("顶级项最多 " + LIMITS.max_menu_items + " 个", "bad"); else { model.push(emptyMenuItem()); paint(); } return null; }, { tone: "mini pri" }),
+    btn("重新读取", function () { return load().then(paint); }, { tone: "mini gho" })));
+
+  var problems = h("div");
+  chkS.body.appendChild(problems);
+
+  var pick = targetsBox({});
+  pushS.body.appendChild(pick.node);
+  pushS.body.appendChild(h("div", { class: "row", style: "margin-top:10px" },
+    btn("仅推送已保存菜单", function () {
+      return call("menuPush", { body: pick.body() }).then(function (r) { pushOut.appendChild(resultBox("推送", r)); });
+    }, { out: function () { return pushOut; } }),
+    btn("保存并推送", function () { return save(true); }, { tone: "pri", out: function () { return pushOut; } })));
+  var pushOut = h("div");
+  pushS.body.appendChild(pushOut);
+
+  function paint() {
+    clear(listHost);
+    if (!model.length) listHost.appendChild(h("p", { class: "empty", text: "菜单为空：点「添加顶级项」开始。" }));
+    model.forEach(function (item, i) { listHost.appendChild(itemBox(item, i, model, true)); });
+    validate();
+  }
+  function itemBox(item, i, list, isTop) {
+    var titleIn = inp({ value: item.title, maxlength: String(LIMITS.max_menu_title_chars + 20), placeholder: "标题" });
+    var kindSel = sel(MENU_ITEM_KINDS.map(function (k) { return [k, k]; }), {});
+    kindSel.value = item.kind;
+    var actionSel = sel([["", "（无动作）"]].concat(MENU_ACTION_KINDS.map(function (k) { return [k, k]; })), {});
+    actionSel.value = item.action;
+    var payloadIn = inp({ value: item.payload, class: "in mono", placeholder: "callback / send_cmd 的 payload，或 open_channel 的频道 URI" });
+    var urlIn = inp({ value: item.url, class: "in mono", placeholder: "https://…" });
+    var grab = {};
+    function sync() {
+      item.title = titleIn.value; item.kind = kindSel.value; item.action = actionSel.value;
+      item.payload = payloadIn.value; item.url = urlIn.value;
+      validate();
+    }
+    [titleIn, payloadIn, urlIn].forEach(function (elx) { elx.addEventListener("input", sync); });
+    kindSel.addEventListener("change", function () {
+      item.kind = kindSel.value;
+      if (item.kind === "view") { actionSel.value = "open_url"; item.action = ""; }
+      if (item.kind === "scancode" || item.kind === "location") { actionSel.value = ""; item.action = ""; }
+      sync(); paint();
+    });
+    actionSel.addEventListener("change", function () { item.action = actionSel.value; sync(); paint(); });
+
+    var isView = item.kind === "view";
+    var noAction = isView || item.kind === "scancode" || item.kind === "location" || !item.action;
+    var grid = h("div", { class: "grid2" },
+      field("标题", titleIn, String(titleIn.value.length) + "/" + LIMITS.max_menu_title_chars),
+      field("类型", kindSel, isView ? "view 只打开链接，不显示箭头" : ""));
+    if (!isView) {
+      grid.appendChild(field("动作", actionSel, "菜单不支持 pay_credits：付款必须用可读的卡片"));
+      if (item.action === "open_url") grid.appendChild(field("url", urlIn));
+      else if (item.action === "open_channel") grid.appendChild(field("payload（频道公开 URI）", payloadIn, "在「频道与密钥轮换」里复制"));
+      else if (item.action) grid.appendChild(field("payload", payloadIn, "以 :: 开头的前缀会被网关静默拦截"));
+    } else grid.appendChild(field("url", urlIn));
+
+    var subs = h("div", { class: "subs" });
+    (item.sub || []).forEach(function (sub, j) { subs.appendChild(itemBox(sub, j, item.sub, false)); });
+
+    var head = h("div", { class: "ih" },
+      h("span", { class: "chip", text: (isTop ? "顶级 " : "子项 ") + (i + 1) }),
+      h("span", { class: "t", text: item.title || "（未命名）" }),
+      h("span", { class: "sp" },
+        btn("↑", function () { move(list, i, -1); return null; }, { tone: "mini gho" }),
+        btn("↓", function () { move(list, i, 1); return null; }, { tone: "mini gho" }),
+        isTop ? btn("+ 子项", function () {
+          if ((item.sub || []).length >= LIMITS.max_menu_subitems) { toast("子项上限 " + LIMITS.max_menu_subitems + " 个", "bad"); return null; }
+          if (!item.sub) item.sub = [];
+          item.sub.push(emptyMenuItem()); paint(); return null;
+        }, { tone: "mini" }) : btn("删除", function () { list.splice(i, 1); paint(); return null; }, { tone: "mini dan" }),
+        isTop ? btn("删除", function () { list.splice(i, 1); paint(); return null; }, { tone: "mini dan" }) : null));
+    grab.x = 1;
+    return h("div", { class: "item" }, head, grid, subs);
+  }
+  function move(list, i, delta) {
+    var j = i + delta;
+    if (j < 0 || j >= list.length) return null;
+    var tmp = list[i]; list[i] = list[j]; list[j] = tmp;
+    paint();
+    return null;
+  }
+  function validate() {
+    var bad = menuProblems(model, true);
+    clear(problems);
+    if (bad.length) bad.forEach(function (b) { problems.appendChild(h("div", { class: "warnline", text: "· " + b })); });
+    else problems.appendChild(h("div", { class: "hint", text: "✓ 全部规则通过：" + model.length + " 个顶级项，将发送 " + dump(menuToWire(model)).slice(0, 60) + "…" }));
+    var pv = h("div");
+    pv.appendChild(pretty(menuToWire(model)));
+    clear(liveS.body);
+    liveS.body.appendChild(kv([
+      ["service_id", h("span", { class: "mono", text: meta.service_id })],
+      ["revision", String(meta.rev === undefined ? "—" : meta.rev)],
+      ["更新时间", meta.updated_at_ms ? localDate(meta.updated_at_ms) : h("span", { class: "nil", text: "从未" })],
+      ["最近推送", meta.last_delivered_ms ? ago(meta.last_delivered_ms) : h("span", { class: "nil", text: "从未" })],
+      ["顶级项数", String((meta.items || []).length)]
+    ]));
+    liveS.body.appendChild(h("h4", { class: "sub", text: "待发送的 items（与 POST /api/v1/menu 完全一致）" }));
+    liveS.body.appendChild(pv);
+    return bad;
+  }
+  function save(andPush) {
+    var bad = validate();
+    if (bad.length) { toast("规则自检未通过（见「客户端规则自检」）", "bad"); return Promise.reject(new ApiError("菜单不符合客户端规则", { status: 0, code: "console_validation" })); }
+    return call("menuSet", { body: { items: menuToWire(model), push: !!andPush } }).then(function (r) {
+      pushOut.appendChild(resultBox(andPush ? "保存并推送" : "已保存", r));
+      toast("菜单已写入", "good");
+      return load().then(function () { model = menuFromWire(meta.items); paint(); });
+    });
+  }
+  async function load() {
+    var r = await call("menuGet");
+    meta = r.menu || {};
+    model = menuFromWire(meta.items);
+    paint();
+    return r;
+  }
+  load().catch(function (e) { renderError(edS.body, e); });
+};
+
+/* ======================================================================== *
+ * 6c. 卡片下发
+ * ======================================================================== */
+
+function emptyCard() {
+  return { title: "", style: "standard", body: "", fields: [], progress: { on: false, l: "", p: 0, d: "" },
+           actions: [], expires: "", visible_text: "", topic: "console", card_id: "" };
+}
+function emptyAction(i) {
+  return { id: "a" + (i + 1), title: "", action: "callback", style: "primary", payload: "", url: "", amount: 1, confirm: false };
+}
+function cardProblems(c, targets) {
+  var bad = [];
+  if (!String(c.title || "").trim()) bad.push("title 不能为空。");
+  if (String(c.title || "").length > LIMITS.card_title) bad.push("title 超过 " + LIMITS.card_title + " 字符。");
+  if (String(c.body || "").length > LIMITS.card_body) bad.push("body 超过 " + LIMITS.card_body + " 字符。");
+  if (CARD_STYLES.indexOf(c.style) < 0) bad.push("style 只能是 " + CARD_STYLES.join("/") + "。");
+  if (c.fields.length > LIMITS.max_fields) bad.push("字段 " + c.fields.length + " 个，上限 " + LIMITS.max_fields + " 个。");
+  c.fields.forEach(function (f, i) {
+    if (!String(f.k || "").trim() || !String(f.v || "").trim()) bad.push("字段 " + (i + 1) + "：k 与 v 都不能为空。");
+    if (String(f.k || "").length > LIMITS.field_label) bad.push("字段 " + (i + 1) + "：k 超过 " + LIMITS.field_label + " 字符。");
+    if (String(f.v || "").length > LIMITS.field_value) bad.push("字段 " + (i + 1) + "：v 超过 " + LIMITS.field_value + " 字符。");
+  });
+  if (c.progress.on) {
+    if (!String(c.progress.l || "").trim()) bad.push("进度条需要标签。");
+    var p = n(c.progress.p);
+    if (!(p >= LIMITS.progress_min && p <= LIMITS.progress_max)) bad.push("进度百分比必须在 " + LIMITS.progress_min + "–" + LIMITS.progress_max + "。");
+    if (String(c.progress.d || "").length > LIMITS.field_value) bad.push("进度详情超过 " + LIMITS.field_value + " 字符。");
+  }
+  if (c.actions.length > LIMITS.max_actions) bad.push("按钮 " + c.actions.length + " 个，上限 " + LIMITS.max_actions + " 个。");
+  var ids = {};
+  c.actions.forEach(function (a, i) {
+    var tag = "按钮 " + (i + 1);
+    if (!String(a.id || "").trim()) bad.push(tag + "：id 为空；客户端按 id 分发点击，缺失会让整张卡解码失败。");
+    if (ids[a.id]) bad.push(tag + "：id 与前面某个按钮重复。");
+    ids[a.id] = true;
+    if (!String(a.title || "").trim()) bad.push(tag + "：标题为空。");
+    if (String(a.title || "").length > LIMITS.field_label) bad.push(tag + "：标题超过 " + LIMITS.field_label + " 字符。");
+    if (CARD_ACTION_KINDS.indexOf(a.action) < 0) bad.push(tag + "：未知动作类型 " + a.action + "。");
+    if (ACTION_STYLES.indexOf(a.style) < 0) bad.push(tag + "：style 只能是 " + ACTION_STYLES.join("/") + "。");
+    if (a.action === "callback" || a.action === "send_cmd") { if (!String(a.payload || "").trim()) bad.push(tag + "：动作 " + a.action + " 需要 payload。"); }
+    if (a.action === "open_url" && !/^https?:\/\//i.test(a.url || "")) bad.push(tag + "：open_url 需要 http(s) 链接。");
+    if (a.action === "open_channel" && !/^popopx:\/\//i.test(a.payload || "")) bad.push(tag + "：open_channel 的 payload 必须是频道公开 URI。");
+    if (a.action === "pay_credits") { var am = n(a.amount); if (!(am >= LIMITS.credits_min && am <= LIMITS.credits_max)) bad.push(tag + "：pay_credits 的 amount 必须在 " + LIMITS.credits_min + "–" + LIMITS.credits_max + "。"); }
+    if (String(a.payload || "").length > LIMITS.payload) bad.push(tag + "：payload 超过 " + LIMITS.payload + " 字符。");
+  });
+  if (c.visible_text && targets && targets.all_contacts) bad.push("勾选了「全部联系人」时不要填 visible_text：无卡片模式回退是逐人行为，文案应当逐人确认。");
+  return bad;
+}
+function cardWire(c) {
+  var out = { title: c.title, style: c.style };
+  if (String(c.body || "").trim()) out.body = c.body;
+  if (c.fields.length) out.fields = c.fields.map(function (f) { var e = { k: f.k, v: f.v }; if (f.mono) e.mono = true; return e; });
+  if (c.progress.on) {
+    out.progress = { l: c.progress.l, p: n(c.progress.p) };
+    if (String(c.progress.d || "").trim()) out.progress.d = c.progress.d;
+  }
+  if (c.actions.length) {
+    out.actions = c.actions.map(function (a) {
+      var e = { id: a.id, title: a.title, action: a.action, style: a.style };
+      if (a.action === "open_url") e.url = a.url;
+      else if (a.action === "pay_credits") e.amount = n(a.amount);
+      else e.payload = a.payload;
+      if (a.confirm) e.confirm = true;
+      return e;
+    });
+  }
+  var et = fromLocalInput(c.expires);
+  if (et) out.expires_at_ms = et;
+  if (String(c.card_id || "").trim()) out.card_id = c.card_id.trim();
+  if (String(c.visible_text || "").trim()) out.visible_text = c.visible_text;
+  out.topic = String(c.topic || "console");
+  return out;
+}
+
+VIEWS.cards = function (host) {
+  var model = emptyCard();
+  var editS = section("卡片编辑", "写出的每个键都对应 PopopxServiceCard 的线上字段");
+  var targetS = section("收件人", "一张卡对应一个联系人的一行存储；广播会派生 card_id 后缀");
+  var sendS = section("下发", "每张卡按 card 计量扣算力");
+  var histS = section("卡片历史", "state=settled 表示按钮已退役");
+  [editS, targetS, sendS, histS].forEach(function (x) { host.appendChild(x.node); });
+
+  var out = h("div"), sendOut = h("div");
+  var titleIn = inp({ value: model.title, placeholder: "订单 #1024 已发货" });
+  var styleSel = sel(CARD_STYLES.map(function (s) { return [s, lab("card_style", s) || s]; }), {});
+  var bodyIn = area({ rows: 3, placeholder: "正文（可选，最多 " + LIMITS.card_body + " 字符）" });
+  var visIn = inp({ placeholder: "无卡片模式下的纯文本回退（客户端 8 分钟前且 mode=c 才显示）" });
+  var topicIn = inp({ value: "console", class: "in mono" });
+  var idIn = inp({ placeholder: "留空自动生成；广播时作为前缀派生每人行", class: "in mono" });
+  var expIn = inp({ type: "datetime-local" });
+
+  editS.body.appendChild(h("div", { class: "grid2" },
+    field("title", titleIn), field("style（客户端 v 字段）", styleSel, "receipt 用于账单，security 用于安全提醒"),
+    field("expires_at_ms", expIn, "留空即不过期"),
+    field("card_id", idIn),
+    field("topic", topicIn, "用于把同一业务的卡片归组"),
+    field("visible_text", visIn)));
+  editS.body.appendChild(field("body", bodyIn));
+
+  var fieldsHost = h("div");
+  editS.body.appendChild(h("h4", { class: "sub", text: "字段（最多 " + LIMITS.max_fields + " 条）" }));
+  editS.body.appendChild(fieldsHost);
+  editS.body.appendChild(h("div", { class: "row" }, btn("+ 字段", function () {
+    if (model.fields.length >= LIMITS.max_fields) { toast("字段上限 " + LIMITS.max_fields, "bad"); return null; }
+    model.fields.push({ k: "", v: "", mono: false }); paintFields(); return null;
+  }, { tone: "mini" }), h("span", { class: "hint", text: "mono 让值以等宽字体显示（单号、金额、地址）" })));
+
+  var progOn = chk("启用进度条", false);
+  var progL = inp({ placeholder: "标签", value: "进度" });
+  var progP = inp({ type: "number", min: "0", max: "100", value: "0" });
+  var progD = inp({ placeholder: "详情（可选）" });
+  editS.body.appendChild(h("h4", { class: "sub", text: "进度条" }));
+  editS.body.appendChild(h("div", { class: "grid3" }, progOn.node, field("label", progL), field("percent", progP), field("detail", progD)));
+
+  var actsHost = h("div");
+  editS.body.appendChild(h("h4", { class: "sub", text: "按钮（最多 " + LIMITS.max_actions + " 个）" }));
+  editS.body.appendChild(actsHost);
+  editS.body.appendChild(h("div", { class: "row" }, btn("+ 按钮", function () {
+    if (model.actions.length >= LIMITS.max_actions) { toast("按钮上限 " + LIMITS.max_actions, "bad"); return null; }
+    model.actions.push(emptyAction(model.actions.length)); paintActions(); return null;
+  }, { tone: "mini pri" }), h("span", { class: "hint", text: "callback 的 payload 会以 ::CB:: 静默回传，不产生聊天消息" })));
+
+  function readCommon() {
+    model.title = titleIn.value; model.style = styleSel.value; model.body = bodyIn.value;
+    model.visible_text = visIn.value; model.topic = topicIn.value; model.card_id = idIn.value;
+    model.expires = expIn.value;
+    model.progress = { on: progOn.get(), l: progL.value, p: n(progP.value), d: progD.value };
+  }
+  function paintFields() {
+    readCommon();
+    clear(fieldsHost);
+    if (!model.fields.length) fieldsHost.appendChild(h("p", { class: "empty", text: "（无字段）" }));
+    model.fields.forEach(function (f, i) {
+      var kIn = inp({ value: f.k, placeholder: "标签" }), vIn = inp({ value: f.v, placeholder: "值" }), mo = chk("等宽", f.mono);
+      kIn.addEventListener("input", function () { f.k = kIn.value; });
+      vIn.addEventListener("input", function () { f.v = vIn.value; });
+      mo.box.addEventListener("change", function () { f.mono = mo.get(); });
+      fieldsHost.appendChild(h("div", { class: "item" },
+        h("div", { class: "ih" }, h("span", { class: "chip", text: "字段 " + (i + 1) }),
+          h("span", { class: "sp" }, btn("删除", function () { model.fields.splice(i, 1); paintFields(); return null; }, { tone: "mini dan" }))),
+        h("div", { class: "grid2" }, field("k", kIn), field("v", vIn), mo.node)));
+    });
+  }
+  function paintActions() {
+    readCommon();
+    clear(actsHost);
+    if (!model.actions.length) actsHost.appendChild(h("p", { class: "empty", text: "（无按钮：卡片只展示，不可点击）" }));
+    model.actions.forEach(function (a, i) {
+      var idIn2 = inp({ value: a.id, class: "in mono" }), tIn = inp({ value: a.title, placeholder: "按钮文字" });
+      var kSel = sel(CARD_ACTION_KINDS.map(function (k) { return [k, k]; }), {}); kSel.value = a.action;
+      var sSel = sel(ACTION_STYLES.map(function (k) { return [k, k]; }), {}); sSel.value = a.style;
+      var payIn = inp({ value: a.payload, class: "in mono", placeholder: "payload（回调标识）" });
+      var urlIn = inp({ value: a.url, class: "in mono", placeholder: "https://…" });
+      var amtIn = inp({ value: String(a.amount), type: "number", min: "1", max: String(LIMITS.credits_max) });
+      var cf = chk("点击前确认", a.confirm);
+      function sync() {
+        a.id = idIn2.value; a.title = tIn.value; a.action = kSel.value; a.style = sSel.value;
+        a.payload = payIn.value; a.url = urlIn.value; a.amount = n(amtIn.value); a.confirm = cf.get();
+        showFields();
+      }
+      [idIn2, tIn, payIn, urlIn, amtIn].forEach(function (e) { e.addEventListener("input", sync); });
+      kSel.addEventListener("change", function () { a.action = kSel.value; sync(); paintActions(); });
+      sSel.addEventListener("change", function () { a.style = sSel.value; sync(); });
+      cf.box.addEventListener("change", sync);
+      function showFields() {
+        clear(extra);
+        if (a.action === "open_url") extra.appendChild(field("url", urlIn));
+        else if (a.action === "pay_credits") extra.appendChild(field("amount（POPX-CP）", amtIn, "客户端在扣费前会二次确认"));
+        else if (a.action === "open_channel") extra.appendChild(field("payload（频道公开 URI）", payIn));
+        else extra.appendChild(field("payload", payIn));
+      }
+      var extra = h("div");
+      showFields();
+      actsHost.appendChild(h("div", { class: "item" },
+        h("div", { class: "ih" }, h("span", { class: "chip", text: "按钮 " + (i + 1) }), h("span", { class: "t mono", text: a.id }),
+          h("span", { class: "sp" }, btn("删除", function () { model.actions.splice(i, 1); paintActions(); return null; }, { tone: "mini dan" }))),
+        h("div", { class: "grid2" }, field("id", idIn2), field("title", tIn), field("action", kSel), field("style", sSel)),
+        extra, h("div", { style: "margin-top:7px" }, cf.node)));
+    });
+  }
+  [titleIn, bodyIn, visIn, topicIn, idIn, expIn, progL, progP, progD].forEach(function (e) {
+    e.addEventListener("input", function () { readCommon(); });
+  });
+
+  var pick = targetsBox({});
+  targetS.body.appendChild(pick.node);
+  targetS.body.appendChild(h("div", { class: "row", style: "margin-top:10px" }, h("span", { class: "chip i", id: "cost" })));
+  function paintCost() {
+    var count = pick.count();
+    var elx = $("cost");
+    if (!elx) return;
+    elx.textContent = "预估 " + fmtInt(count * meter("card")) + " POPX-CP（" + count + " 人 × " + meter("card") + "）";
+    elx.className = "chip " + (STATE.account && n(STATE.account.balance) < count * meter("card") ? "b" : "i");
+  }
+  targetS.body.appendChild(h("p", { class: "hint", text: "「下发」按所选目标逐人投递；无活动会话的人会进入队列而不是失败。" }));
+
+  sendS.body.appendChild(h("div", { class: "row" },
+    btn("预览请求体", function () {
+      readCommon();
+      var body = cardWire(model);
+      Object.assign(body, pick.body());
+      var bad = cardProblems(model, pick.body());
+      out.appendChild(h("div", {}, bad.length ? bad.map(function (b) { return h("div", { class: "warnline", text: "· " + b }); }) : h("div", { class: "hint", text: "✓ 规则自检通过" })));
+      out.appendChild(resultBox("POST /api/v1/cards", body));
+      return null;
+    }, { out: function () { return out; } }),
+    btn("下发卡片", function () {
+      readCommon();
+      var bad = cardProblems(model, pick.body());
+      if (bad.length) { toast(bad[0], "bad"); return Promise.reject(new ApiError(bad[0], { status: 0, code: "console_validation" })); }
+      var body = cardWire(model);
+      Object.assign(body, pick.body());
+      return call("cardSend", { body: body }).then(function (r) {
+        out.appendChild(deliveryTable(r.deliveries || [], "下发结果"));
+        toast("已投递 " + (r.sent || 0) + " 张", "good");
+        return refreshHistory();
+      });
+    }, { tone: "pri", out: function () { return out; } }),
+    btn("清空", function () { model = emptyCard(); titleIn.value = ""; bodyIn.value = ""; visIn.value = ""; idIn.value = ""; expIn.value = ""; progOn.set(false); model.fields = []; model.actions = []; paintFields(); paintActions(); return null; }, { tone: "gho" })));
+  sendS.body.appendChild(out);
+
+  function deliveryTable(rows, title) {
+    var cols = [
+      { label: "联系人", get: function (r) { return "#" + r.contact_id; } },
+      { label: "card_id", get: function (r) { return h("span", { class: "mono", title: r.card_id, text: short(r.card_id, 14, 5) }); } },
+      { label: "结果", get: function (r) { return r.sent ? chip("已发送", "g") : r.queued ? chip("已排队", "w") : chip("失败", "b"); } },
+      { label: "扣费", get: function (r) { return r.charged ? cr(r.charged) : "0"; } },
+      { label: "余额", get: function (r) { return r.balance_after === undefined ? "—" : fmtInt(r.balance_after); } },
+      { label: "错误", get: function (r) { return r.error || "—"; } }
+    ];
+    return h("div", {}, h("h4", { class: "sub", text: title }), tableOf(cols, rows, "（没有投递记录）"));
+  }
+
+  var fTopic = inp({ class: "in mini", placeholder: "按 topic 过滤" });
+  var fContact = inp({ class: "in mini", placeholder: "按联系人 #", type: "number" });
+  var fLimit = sel([[25, "25 行"], [100, "100 行"], [500, "500 行"]], { class: "in mini" });
+  histS.body.appendChild(h("div", { class: "row" }, fTopic, fContact, fLimit,
+    btn("查询", function () { return refreshHistory(); }, { out: function () { return sendOut; }, tone: "mini pri" })));
+  histS.body.appendChild(sendOut);
+
+  var histCols = [
+    { label: "card_id", get: function (r) { return h("span", { class: "mono", title: r.card_id, text: short(r.card_id, 12, 5) }); } },
+    { label: "标题", get: function (r) { return r.title; } },
+    { label: "状态", get: function (r) { return chip(lab("card_state", r.state), r.state === "settled" ? "" : r.state === "failed" ? "b" : "g"); } },
+    { label: "联系人", get: function (r) { return "#" + r.contact_id; } },
+    { label: "topic", get: function (r) { return h("span", { class: "mono", text: r.topic || "—" }); } },
+    { label: "更新", get: function (r) { return ago(r.updated_at_ms); } },
+    { label: "过期", get: function (r) { return r.expires_at_ms ? inOrAgo(r.expires_at_ms) : "不过期"; } },
+    { label: "操作", get: function (r) {
+        var box = h("div", { class: "row" });
+        box.appendChild(btn("载入编辑器", function () { return loadCard(r.card_id); }, { tone: "mini" }));
+        /* 就地更新：手机端逐字段合并，所以只填要改的字段，其余保持线上内容。
+         * 不带 contact_ids 时服务端自己找出所有持有者（含 card_id_随机后缀 的派生行）。 */
+        if (r.state !== "settled") {
+          box.appendChild(btn("推送更新", function () {
+            var raw = window.prompt("新的进度（0-100，留空表示不改）：", String(r.progress === undefined || r.progress === null ? "" : r.progress));
+            if (raw === null) return null;
+            var text = String(raw).trim();
+            var progress = text === "" ? null : Number(text);
+            if (progress !== null && !(progress >= 0 && progress <= 100)) { toast("进度必须是 0 到 100", "bad"); return Promise.reject(new ApiError("进度越界", { status: 0, code: "console_progress_out_of_range" })); }
+            var note = window.prompt("新的正文（留空表示不改）：", "");
+            if (note === null) return null;
+            var body = {};
+            if (progress !== null) body.progress = progress;
+            if (String(note).trim()) body.body = String(note).trim();
+            if (!Object.keys(body).length) { toast("进度和正文都没改，不发空更新", "bad"); return null; }
+            var everyone = window.confirm("确定：「是」推送给持有这张卡的全部联系人（按人数扣 card），「取消」只推送给 " + "#" + r.contact_id + " 这一位。");
+            if (!everyone) body.contact_ids = [r.contact_id];
+            return call("cardUpdate", { params: { card_id: r.card_id }, body: body }).then(function (res) {
+              sendOut.appendChild(resultBox("更新已推送 " + short(r.card_id, 10, 4), res));
+              return refreshHistory();
+            });
+          }, { tone: "mini", out: function () { return sendOut; } }));
+        }
+        if (r.state !== "settled") {
+          box.appendChild(btn("标记完成", function () {
+            return call("cardSettle", { params: { card_id: r.card_id }, body: {} }).then(function (res) {
+              sendOut.appendChild(resultBox("已完成 " + short(r.card_id, 10, 4), res));
+              return refreshHistory();
+            });
+          }, { tone: "mini", out: function () { return sendOut; } }));
+        }
+        box.appendChild(btn("查看线上帧", function () {
+          return call("cardGet", { params: { card_id: r.card_id } }).then(function (res) {
+            sendOut.appendChild(h("div", {}, h("h4", { class: "sub", text: "cards 行" }), pretty(res.card),
+              h("h4", { class: "sub", text: "重建的 wire（与下发的密封内容一致）" }), pretty(res.wire),
+              h("h4", { class: "sub", text: "已记录的按钮回调" }), tableOf([
+                { label: "action", k: "action_id" }, { label: "类型", k: "kind" }, { label: "payload", k: "payload" },
+                { label: "状态", k: "state" }, { label: "金额", k: "amount" }, { label: "时间", get: function (a) { return localDate(a.created_at_ms); } }
+              ], res.actions || [], "（尚未点击）")));
+          });
+        }, { tone: "mini gho", out: function () { return sendOut; } }));
+        return box;
+      } }
+  ];
+
+  async function loadCard(cardId) {
+    var res = await call("cardGet", { params: { card_id: cardId } });
+    var row = res.card || {};
+    model.title = row.title || "";
+    model.style = row.style || "standard";
+    model.body = row.body || "";
+    model.fields = parseJsonField(row.fields_json, []) || [];
+    var pr = parseJsonField(row.progress_json, null);
+    model.progress = pr ? { on: true, l: pr.l || "", p: n(pr.p), d: pr.d || "" } : { on: false, l: "", p: 0, d: "" };
+    model.actions = (parseJsonField(row.actions_json, []) || []).map(function (a) {
+      return { id: a.id || "", title: a.title || "", action: a.action || "callback", style: a.style || "primary",
+               payload: a.payload || "", url: a.url || "", amount: n(a.amount || 1), confirm: !!a.confirm };
+    });
+    model.card_id = "";
+    model.expires = row.expires_at_ms ? toLocalInput(row.expires_at_ms) : "";
+    model.topic = row.topic || "console";
+    model.visible_text = "";
+    titleIn.value = model.title; styleSel.value = model.style; bodyIn.value = model.body;
+    topicIn.value = model.topic; expIn.value = model.expires; progOn.set(model.progress.on);
+    progL.value = model.progress.l; progP.value = String(model.progress.p); progD.value = model.progress.d;
+    paintFields(); paintActions();
+    progOn.set(model.progress.on);
+    toast("已载入 " + short(cardId, 12, 5) + "，编辑后用「下发卡片」发送新卡；原地更新请在下方使用", "good");
+    window.scrollTo(0, 0);
+    $("stage").scrollTop = 0;
+    return res;
+  }
+
+  async function refreshHistory() {
+    var q = { limit: Number(fLimit.value) || 100 };
+    if (String(fTopic.value || "").trim()) q.topic = fTopic.value.trim();
+    if (String(fContact.value || "").trim()) q.contact_id = Number(fContact.value);
+    var r = await call("cards", { query: q });
+    clear(sendOut);
+    sendOut.appendChild(tableOf(histCols, r.cards || [], "还没有卡片。"));
+    return r;
+  }
+  fTopic.addEventListener("keydown", function (e) { if (e.key === "Enter") refreshHistory().catch(function (x) { renderError(sendOut, x); }); });
+
+  paintFields(); paintActions();
+  pick.node.addEventListener("change", paintCost);
+  paintCost();
+  refreshHistory().catch(function (e) { renderError(sendOut, e); });
+  loadAccount().then(paintCost).catch(function () { /* 计费读取失败不阻塞编辑 */ });
+};
+
+/* ======================================================================== *
+ * 6d. 频道与密钥轮换
+ * ======================================================================== */
+
+VIEWS.channels = function (host) {
+  var listS = section("频道", "identity_sec 永不离开网关；对外只给 public_uri");
+  var newS = section("新建频道", "relay 是节点群组所在的服务器主机名");
+  var detS = section("频道详情", "选择左侧任一行");
+  [listS, newS, detS].forEach(function (x) { host.appendChild(x.node); });
+
+  var listOut = h("div");
+  listS.body.appendChild(listOut);
+
+  var idIn = inp({ class: "in mono", placeholder: "留空自动生成 ch…" });
+  var titleIn2 = inp({ placeholder: "频道标题" });
+  var relayIn = inp({ class: "in mono", placeholder: "smp.example.org" });
+  var groupIn = inp({ type: "number", placeholder: "节点群组 id（可选）" });
+  newS.body.appendChild(h("div", { class: "grid2" },
+    field("channel_id", idIn), field("title", titleIn2), field("relay", relayIn), field("node_group_id", groupIn)));
+  var newOut = h("div");
+  newS.body.appendChild(h("div", { class: "row" },
+    btn("创建", function () {
+      var body = { title: titleIn2.value, relay: relayIn.value.trim() };
+      if (idIn.value.trim()) body.channel_id = idIn.value.trim();
+      if (String(groupIn.value || "").trim()) body.node_group_id = Number(groupIn.value);
+      return call("channelCreate", { body: body }).then(function (r) {
+        newOut.appendChild(resultBox("已创建", r));
+        toast("频道已创建，public_uri 在结果里", "good");
+        return refreshList();
+      });
+    }, { tone: "pri", out: function () { return newOut; } })));
+  newS.body.appendChild(newOut);
+
+  var cols = [
+    { label: "channel_id", get: function (r) { return h("a", { href: "#", class: "mono", text: r.channel_id, on: { click: function (e) { e.preventDefault(); show(r.channel_id); } } }); } },
+    { label: "标题", k: "title" },
+    { label: "relay", get: function (r) { return r.relay ? h("span", { class: "mono", text: r.relay }) : chip("无 relay", "w"); } },
+    { label: "epoch", get: function (r) { return h("span", { class: "num", text: String(r.current_epoch === undefined ? "—" : r.current_epoch) }); } },
+    { label: "创建", get: function (r) { return ago(r.created_at_ms); } },
+    { label: "上次轮换", get: function (r) { return r.rotated_at_ms ? ago(r.rotated_at_ms) : "从未"; } },
+    { label: "公开 URI", get: function (r) { return r.public_uri ? h("div", { class: "row" }, h("code", { class: "mono", title: r.public_uri, text: short(r.public_uri, 22, 8) }), copyBtn(function () { return r.public_uri; }, "复制")) : chip("需要 relay", "w"); } }
+  ];
+  function refreshList() {
+    return loadChannels(true).then(function (rows) {
+      clear(listOut);
+      listOut.appendChild(tableOf(cols, rows, "还没有频道。"));
+      if (rows.length) show(rows[0].channel_id);
+      return rows;
+    });
+  }
+
+  var selected = "";
+  async function show(channelId) {
+    selected = String(channelId);
+    var r = await call("channelGet", { params: { channel_id: selected } });
+    clear(detS.body);
+    var ch = r.channel || {}, uri = r.public_uri || "";
+    var head = h("div", { class: "grid2" },
+      h("div", {}, kv([
+        ["channel_id", h("span", { class: "mono", text: ch.channel_id })],
+        ["title", ch.title],
+        ["relay", h("span", { class: "mono", text: ch.relay || "（未设置）" })],
+        ["current_epoch", h("span", { class: "num", text: String(ch.current_epoch) })],
+        ["identity_pub", h("span", { class: "mono", title: ch.identity_pub_b64url, text: short(ch.identity_pub_b64url, 18, 8) })],
+        ["node_group_id", String(ch.node_group_id === undefined ? "—" : ch.node_group_id)]
+      ])),
+      h("div", {},
+        field("public_uri（给新成员导入的唯一入口）", h("textarea", { class: "in mono", rows: 3, readonly: true, value: uri || "（缺少 relay，无法生成）" }),
+          "导入只创建 epoch 1；之后的每个 epoch 由密钥帧送达"),
+        h("div", { class: "row", style: "margin-top:8px" },
+          copyBtn(function () { return uri; }, "复制 URI"),
+          btn("修改 relay", function () {
+            var value = window.prompt("新的 relay 主机名（不含 @ 与路径）：", ch.relay || "");
+            if (value === null) return null;
+            return call("channelUri", { params: { channel_id: selected }, body: { relay: value.trim() } })
+              .then(function (res) { detOut.appendChild(resultBox("relay 已更新", res)); return refreshList(); });
+          }, { tone: "mini" }),
+          btn("重新生成 URI", function () { return call("channelGet", { params: { channel_id: selected } }).then(function (res) { detOut.appendChild(resultBox("当前 URI", { public_uri: res.public_uri })); }); }, { tone: "mini gho" }))));
+    detS.body.appendChild(head);
+
+    /* —— 密钥轮换 —— */
+    var rotExp = inp({ type: "datetime-local" });
+    var rotRevoke = chk("撤销上一 epoch", true);
+    var rotNotify = chk("向成员下发新密钥", true);
+    var members = (r.members || []);
+    var active = members.filter(function (m) { return m.status === "active"; }).length;
+    var price = meter("key_rotation");
+    var rotBox = section("密钥轮换", "每个被通知的成员按 key_rotation 计量扣算力", [h("span", { class: "chip i", text: "成员 " + active + " 人 · 预估 " + fmtInt(active * price) + " POPX-CP" })]);
+    rotBox.body.appendChild(h("div", { class: "grid3" },
+      field("新 epoch 过期时间", rotExp, "留空即不过期"),
+      rotRevoke.node, rotNotify.node));
+    rotBox.body.appendChild(h("div", { class: "row" },
+      btn("立即轮换", function () {
+        if (!rotNotify.get()) toast("未勾选下发：只有本频道的 epoch 记录会前进，成员拿不到新密钥", "bad");
+        return call("channelRotate", { params: { channel_id: selected }, body: {
+          expires_at_ms: fromLocalInput(rotExp.value), revoke_previous: rotRevoke.get(), notify_members: rotNotify.get()
+        } }).then(function (res) {
+          rotOut.appendChild(resultBox("轮换结果", res));
+          if (res && res.errors && res.errors.length) toast(res.errors.length + " 名成员未送达，见 errors", "bad");
+          return refreshList();
+        });
+      }, { tone: "pri", out: function () { return rotOut; },
+           confirm: "轮换后，epoch " + (ch.current_epoch || 1) + " 以下的密钥将被撤销（取决于下方开关）。确认对 " + active + " 名成员执行？" })));
+    var rotOut = h("div");
+    rotBox.body.appendChild(rotOut);
+    detS.body.appendChild(rotBox.node);
+
+    /* —— epoch 历史 —— */
+    var epochCols = [
+      { label: "epoch", get: function (e) { return h("span", { class: "num", text: String(e.epoch) }); } },
+      { label: "创建", get: function (e) { return localDate(e.created_at_ms).slice(0, 16); } },
+      { label: "过期", get: function (e) { return e.expires_at_ms ? inOrAgo(e.expires_at_ms) : "不过期"; } },
+      { label: "已撤销", get: function (e) { return e.revoked ? chip("是", "b") : "否"; } },
+      { label: "密封于", get: function (e) { return String(e.sealed_under_epoch === null || e.sealed_under_epoch === undefined ? "—" : e.sealed_under_epoch); } },
+      { label: "送达", get: function (e) { return e.delivered_ms ? ago(e.delivered_ms) : "—"; } }
+    ];
+    var histBox = section("epoch 历史", "sealed_under 表示这一把密钥是在哪一代密钥之下加密送达的",
+      [h("span", { class: "chip", text: (r.epochs || []).length + " 个 epoch" })]);
+    histBox.body.appendChild(tableOf(epochCols, (r.epochs || []).slice().reverse(), "（尚无 epoch）"));
+    detS.body.appendChild(histBox.node);
+
+    /* —— 成员 —— */
+    var memFilter = sel([["", "全部状态"], ["active", "有效"], ["expired", "已过期"], ["revoked", "已收回"]], { class: "in mini" });
+    var memCount = h("span", { class: "chip", text: members.length + " 行" });
+    var memBox = section("成员", "收回只撤销资格，不撤销手机里已经存在的旧密钥", [memFilter.node, memCount]);
+    var memDays = inp({ type: "number", value: "30", min: "1" });
+    var memCredits = inp({ type: "number", value: "0", min: "0" });
+    var memRef = inp({ value: "console", class: "in mono" });
+    var memPick = targetsBox({ explicit: true });
+    var memTable = h("div");
+    var memOut = h("div");
+    var memCols = [
+      { label: "联系人", get: function (m) { return "#" + m.contact_id; } },
+      { label: "持有 epoch", k: "epoch" },
+      { label: "状态", get: function (m) { return chip(lab("member_status", m.status), m.status === "active" ? "g" : m.status === "revoked" ? "b" : "w"); } },
+      { label: "授权于", get: function (m) { return ago(m.granted_at_ms); } },
+      { label: "到期", get: function (m) { return m.expires_at_ms ? inOrAgo(m.expires_at_ms) : "—"; } },
+      { label: "已扣", get: function (m) { return cr(m.credits_spent); } },
+      { label: "paid_ref", get: function (m) { return h("span", { class: "mono", text: m.paid_ref || "—" }); } },
+      { label: "操作", get: function (m) {
+          if (m.status !== "active") return "—";
+          return btn("收回", function () {
+            return call("memberRevoke", { params: { channel_id: selected, contact_id: m.contact_id } })
+              .then(function (res) { memOut.appendChild(resultBox("收回 #" + m.contact_id, res)); return loadMembers(); });
+          }, { tone: "mini dan", out: function () { return memOut; },
+               confirm: "收回后该成员不再收到后续 epoch。确认？" });
+        } }
+    ];
+    /* 状态筛选只有这条路由支持：channelGet 返回的是全量成员，用来算轮换报价；
+     * 这一条用来把人找出来。两者用途不同，所以都留着。 */
+    function loadMembers() {
+      return call("members", {
+        params: { channel_id: selected },
+        query: memFilter.value ? { status: memFilter.value } : null
+      }).then(function (res) {
+        var rows = res.members || [];
+        clear(memTable);
+        memTable.appendChild(tableOf(memCols, rows, "（没有符合条件的成员）"));
+        memCount.textContent = rows.length + " 行" + (memFilter.value ? " · 已筛选 " + memFilter.value : "");
+        return rows;
+      });
+    }
+    memFilter.addEventListener("change", function () { loadMembers().catch(function (e) { renderError(memTable, e); }); });
+    memBox.body.appendChild(memPick.node);
+    memBox.body.appendChild(h("div", { class: "grid3", style: "margin-top:10px" },
+      field("days", memDays, "到期后需要续费（再次授权）"),
+      field("credits", memCredits, "0 表示这次授权不额外扣算力"),
+      field("paid_ref", memRef, "写进流水，便于和订单对账")));
+    memBox.body.appendChild(h("div", { class: "row", style: "margin-top:10px" },
+      btn("授权并下发密钥", function () {
+        var ids = memPick.ids();
+        if (!ids.length) { toast("至少选择一个联系人", "bad"); return Promise.reject(new ApiError("未选择成员", { status: 0, code: "console_no_target" })); }
+        return call("memberGrant", { params: { channel_id: selected }, body: {
+          contact_ids: ids, days: Number(memDays.value) || 30, credits: Number(memCredits.value) || 0, paid_ref: memRef.value
+        } }).then(function (res) {
+          memOut.appendChild(h("div", {}, h("h4", { class: "sub", text: "授权结果" }),
+            tableOf([
+              { label: "联系人", get: function (g) { return "#" + g.contact_id; } },
+              { label: "epoch", k: "epoch" },
+              { label: "续期", get: function (g) { return g.renewed ? "是" : "新成员"; } },
+              { label: "送达", get: function (g) { return g.delivered ? chip("密钥帧已发", "g") : chip("未送达", "w"); } },
+              { label: "扣费", get: function (g) { return cr(g.credits_charged); } },
+              { label: "到期", get: function (g) { return localDate(g.expires_at_ms).slice(0, 16); } },
+              { label: "错误", get: function (g) { return g.error || "—"; } }
+            ], res.grants || [])));
+          return loadMembers();
+        });
+      }, { tone: "pri", out: function () { return memOut; } }),
+      btn("刷新成员表", loadMembers, { tone: "gho" })));
+    memBox.body.appendChild(memTable);
+    memBox.body.appendChild(memOut);
+    loadMembers().catch(function (e) { renderError(memTable, e); });
+    detS.body.appendChild(memBox.node);
+    return r;
+  }
+
+  refreshList().catch(function (e) { renderError(listOut, e); });
+};
+
+/* ======================================================================== *
+ * 6e. 图文与 H5
+ * ======================================================================== */
+
+VIEWS.articles = function (host) {
+  var listS = section("图文", "正文存在 settings 里，key 形如 article:<id>");
+  var editS = section("编辑图文", "article_id 只允许字母、数字与 . _ : -，最长 64");
+  var sendS = section("下发与 H5", "回执卡片按 ::REF:<id> 触发，链接带该联系人的签名");
+  var refsS = section("读取记录", "article_refs：谁在什么时候索取过");
+  [listS, editS, sendS, refsS].forEach(function (x) { host.appendChild(x.node); });
+
+  var listOut = h("div"), sendOut = h("div"), refsOut = h("div");
+  listS.body.appendChild(listOut);
+  listS.body.appendChild(h("div", { class: "row" }, btn("刷新", function () { return refresh(); }, { tone: "mini" })));
+
+  var artId = inp({ class: "in mono", placeholder: "news-2026-11" });
+  var artTitle = inp({ placeholder: "标题（最多 120 字符）" });
+  var artBody = area({ rows: 8, placeholder: "正文（最多 20000 字符，渲染于 /h5/<id>）" });
+  var artUrl = inp({ class: "in mono", placeholder: "https:// 站外链接（可选）" });
+  editS.body.appendChild(h("div", { class: "grid2" },
+    field("article_id", artId), field("title", artTitle, artTitle.length + "" ),
+    field("url", artUrl)));
+  editS.body.appendChild(field("body", artBody));
+  editS.body.appendChild(h("div", { class: "row", style: "margin-top:10px" },
+    btn("保存", function () {
+      var id = artId.value.trim();
+      if (!id) { toast("需要 article_id", "bad"); return Promise.reject(new ApiError("缺少 article_id", { status: 0, code: "console_missing_id" })); }
+      return call("articlePut", { params: { article_id: id }, body: { title: artTitle.value, body: artBody.value, url: artUrl.value } })
+        .then(function (r) { editOut.appendChild(resultBox("已保存", r)); toast("图文已保存", "good"); return refresh(); });
+    }, { tone: "pri", out: function () { return editOut; } }),
+    btn("读取", function () {
+      var id = artId.value.trim();
+      return call("articleGet", { params: { article_id: id } }).then(function (r) {
+        artTitle.value = (r.article || {}).title || ""; artBody.value = (r.article || {}).body || ""; artUrl.value = (r.article || {}).url || "";
+        editOut.appendChild(resultBox("读取结果", r));
+      });
+    }, { tone: "gho", out: function () { return editOut; } })));
+  var editOut = h("div");
+  editS.body.appendChild(editOut);
+
+  var pick = targetsBox({});
+  sendS.body.appendChild(pick.node);
+  sendS.body.appendChild(h("div", { class: "row", style: "margin-top:10px" },
+    btn("下发回执卡片", function () {
+      var id = artId.value.trim();
+      if (!id) { toast("先填写 article_id", "bad"); return Promise.reject(new ApiError("缺少 article_id", { status: 0, code: "console_missing_id" })); }
+      return call("articleSend", { params: { article_id: id }, body: pick.body() }).then(function (r) {
+        sendOut.appendChild(tableOf([
+          { label: "联系人", get: function (d) { return "#" + d.contact_id; } },
+          { label: "card_id", get: function (d) { return h("span", { class: "mono", text: short(d.card_id, 14, 5) }); } },
+          { label: "结果", get: function (d) { return d.sent ? chip("已发送", "g") : d.queued ? chip("排队", "w") : chip("失败", "b"); } },
+          { label: "扣费", get: function (d) { return cr(d.charged); } },
+          { label: "错误", get: function (d) { return d.error || "—"; } }
+        ], r.deliveries || [], "（无投递）"));
+      });
+    }, { tone: "pri", out: function () { return sendOut; } }),
+    h("span", { class: "hint", text: "下发的是带签名链接的 receipt 卡片，不是裸 URL。" })));
+  sendS.body.appendChild(sendOut);
+
+  var h5Uid = inp({ class: "in mono", placeholder: "popopx_uid（可从「联系人」复制）" });
+  var h5Ts = inp({ class: "in mono", placeholder: "ts" });
+  var h5Sig = inp({ class: "in mono", placeholder: "sig" });
+  var h5Out = h("div");
+  sendS.body.appendChild(h("h4", { class: "sub", text: "H5 签名自检（POST /api/v1/verifyH5Auth，商家服务端也用这一个接口）" }));
+  sendS.body.appendChild(h("div", { class: "grid3" }, field("uid", h5Uid), field("ts", h5Ts), field("sig", h5Sig)));
+  sendS.body.appendChild(h("div", { class: "row" },
+    btn("校验", function () {
+      return call("h5Auth", { body: { popopx_uid: h5Uid.value.trim(), ts: h5Ts.value.trim(), sig: h5Sig.value.trim() } })
+        .then(function (r) { h5Out.appendChild(resultBox("校验", r)); });
+    }, { out: function () { return h5Out; } }),
+    h("span", { class: "hint", text: "该接口无管理令牌也可访问，因此签名与时间戳（±300 秒）必须自己成立。" })));
+  sendS.body.appendChild(h5Out);
+
+  refsS.body.appendChild(refsOut);
+
+  function refresh() {
+    return Promise.all([call("articles"), call("callbacks", { query: { kind: "article_ref", limit: 100 } })])
+      .then(function (rs) {
+        clear(listOut);
+        listOut.appendChild(tableOf([
+          { label: "article_id", get: function (a) { return h("a", { href: "#", class: "mono", text: a.article_id, on: { click: function (e) { e.preventDefault(); artId.value = a.article_id; return call("articleGet", { params: { article_id: a.article_id } }).then(function (r) { artTitle.value = r.article.title || ""; artBody.value = r.article.body || ""; artUrl.value = r.article.url || ""; toast("已载入 " + a.article_id, "good"); }); } } }); } },
+          { label: "标题", k: "title" },
+          { label: "H5", get: function (a) { return linkTo("h5", "在手机上打开", { article_id: a.article_id }, { class: "mono" }); } },
+          { label: "更新", get: function (a) { return localDate(a.updated_at_ms).slice(0, 16); } }
+        ], rs[0].articles || [], "还没有图文。点标题可载入编辑器。"));
+        clear(refsOut);
+        refsOut.appendChild(tableOf([
+          { label: "时间", get: function (c) { return localDate(c.ts_ms).slice(0, 16); } },
+          { label: "联系人", get: function (c) { return "#" + c.contact_id; } },
+          { label: "payload", get: function (c) { return h("span", { class: "mono", text: c.payload || c.marker || "—" }); } },
+          { label: "状态", get: function (c) { return chip(c.status, c.status === "handled" ? "g" : c.status === "unmatched" ? "w" : "b"); } },
+          { label: "处理器", get: function (c) { return c.handler || "—"; } }
+        ], rs[1].callbacks || [], "还没有人索取图文。"));
+        return rs;
+      });
+  }
+  refresh().catch(function (e) { renderError(listOut, e); });
+};
+
+/* ======================================================================== *
+ * 6f. 计费账户与流水
+ * ======================================================================== */
+
+var METER_WHY = {
+  card: "每张卡片每位收件人（含卡片更新与完成态）",
+  menu_push: "每次菜单帧下发（按位计）",
+  key_rotation: "频道密钥轮换，按每位在管成员计",
+  ai_message: "AI 客服每轮模型回复",
+  alert: "告警每一次状态跃迁（确认/解决）",
+  sso_login: "免密登录每一次成功签发",
+  poll: "投票每一张票",
+  web3_event: "链上事件每一次有效通知"
+};
+
+VIEWS.billing = function (host) {
+  var accS = section("账户", "默认 ONLINE；DRAFT 只在开启激活码准入时出现；余额只在流水之上");
+  var meterS = section("计量价目", "价目为 0 表示该动作免费，而不是漏配");
+  var actS = section("运营动作", "赠送与兑换在流水里可区分：兑换带 voucher_id");
+  var ledS = section("流水", "按 id 倒序（同毫秒也稳定），翻页不会重复或漏行", []);
+  [accS, meterS, actS, ledS].forEach(function (x) { host.appendChild(x.node); });
+
+  var page = { limit: 100, offset: 0, total: 0 };
+  var ledOut = h("div");
+
+  async function refresh() {
+    var data = await loadAccount().then(function () { return call("account"); });
+    var acc = data.account || {}, sum = data.summary || {}, fusings = data.fusings || {};
+    paintBar();
+    clear(accS.body);
+    accS.body.appendChild(h("div", { class: "reps" },
+      statCard("余额", fmtInt(acc.balance), "expected " + fmtInt(sum.expected_balance)),
+      statCard("累计兑换", fmtInt(sum.lifetime_granted), "lifetime_granted"),
+      statCard("累计消耗", fmtInt(sum.lifetime_spent), "lifetime_spent"),
+      statCard("流水行数", fmtInt(sum.ledger_rows), "ledger_balanced " + (sum.ledger_balanced ? "✓" : "✗"))));
+    accS.body.appendChild(kv([
+      ["状态", chip(lab("billing_status", acc.status), acc.status === "ONLINE" ? "g" : acc.status === "SUSPENDED" ? "b" : "w")],
+      ["停用原因", acc.suspended_reason],
+      ["可否计费", acc.is_chargeable ? "可" : "否"],
+      ["需要激活码", sum.require_voucher ? "是（准入模式）" : "否（默认：开箱即用）"],
+      ["停用阈值", String(sum.suspend_threshold)],
+      ["对账", sum.ledger_balanced === false ? chip("余额 != granted − spent，请查诊断", "b") : "一致"],
+      ["发行公钥", sum.official_key_configured ? chip("已配置", "g") : chip("未配置：无法校验兑换", "b")],
+      ["校验器", sum.verifier_configured ? "就绪" : "不可用"]
+    ]));
+    var fuseRow = h("div", { class: "row" });
+    Object.keys(fusings).forEach(function (k) {
+      fuseRow.appendChild(chip(k + " " + (fusings[k] ? "可运行" : "已停止"), fusings[k] ? "g" : "w"));
+    });
+    accS.body.appendChild(h("h4", { class: "sub", text: "插件熔断（余额派生，非存储字段）" }));
+    accS.body.appendChild(fuseRow);
+    if (acc.status === "SUSPENDED") {
+      accS.body.appendChild(h("p", { class: "warnline", text: "账户已停用：只有「恢复在线」能解除，充值不会自动恢复。" }));
+    }
+
+    clear(meterS.body);
+    meterS.body.appendChild(tableOf([
+      { label: "meter", get: function (m) { return h("span", { class: "mono", text: m.key }); } },
+      { label: "单价", get: function (m) { return h("span", { class: "num", text: String(m.price) }); } },
+      { label: "计费对象", get: function (m) { return METER_WHY[m.key] || "—"; } },
+      { label: "状态", get: function (m) { return m.price === 0 ? chip("免费", "i") : "计费"; } }
+    ], Object.keys(STATE.meters).sort().map(function (k) { return { key: k, price: n(STATE.meters[k]) }; })));
+
+    clear(ledS.body);
+    ledS.body.appendChild(ledOut);
+    await refreshLedger();
+  }
+
+  async function refreshLedger() {
+    var r = await call("ledger", { query: { limit: page.limit, offset: page.offset } });
+    page.total = n(r.total);
+    var cols = [
+      { label: "id", k: "id", cls: "num" },
+      { label: "时间", get: function (e) { return localDate(e.ts_ms).slice(4); } },
+      { label: "类型", get: function (e) { return chip(e.kind, e.kind === "grant" ? "g" : e.kind === "refund" ? "i" : e.kind === "consume" ? "" : "w"); } },
+      { label: "金额", get: function (e) { return h("span", { class: "num", text: (e.kind === "consume" ? "−" : "+") + fmtInt(Math.abs(n(e.amount))) }); } },
+      { label: "余额", get: function (e) { return h("span", { class: "num", text: fmtInt(e.balance_after) }); } },
+      { label: "ref", get: function (e) { return h("span", { class: "mono", title: e.ref, text: short(e.ref, 20, 6) }); } },
+      { label: "subject", get: function (e) { return h("span", { class: "mono", title: e.subject, text: short(e.subject, 14, 6) }); } },
+      { label: "幂等键", get: function (e) { return e.idempotency_key ? h("span", { class: "mono", text: short(e.idempotency_key, 12, 4) }) : "—"; } },
+      { label: "meta", get: function (e) {
+          if (!e.meta || (typeof e.meta === "object" && !Object.keys(e.meta).length)) return "—";
+          return h("span", { class: "chip", title: dump(e.meta), text: "查看" });
+        } }
+    ];
+    clear(ledOut);
+    ledOut.appendChild(h("div", { class: "row", style: "margin-bottom:10px" },
+      h("span", { class: "hint", text: "第 " + (Math.floor(page.offset / page.limit) + 1) + " 页 · 共 " + fmtInt(page.total) + " 行" }),
+      h("span", { class: "grow" }),
+      btn("上一页", function () { page.offset = Math.max(0, page.offset - page.limit); return refreshLedger(); }, { tone: "mini", out: function () { return ledOut; } }),
+      btn("下一页", function () { if (page.offset + page.limit < page.total) { page.offset += page.limit; return refreshLedger(); } toast("已是最后一页", ""); return null; }, { tone: "mini", out: function () { return ledOut; } })));
+    ledOut.appendChild(tableOf(cols, r.entries || [], "（流水为空）"));
+  }
+
+  var grantIn = inp({ type: "number", min: "1", max: String(LIMITS.credits_max), placeholder: "算力" });
+  var grantWhy = inp({ placeholder: "reason（例如 goodwill:2026-11）", class: "in mono" });
+  var grantKey = inp({ placeholder: "idempotency_key（重复提交只入账一次）", class: "in mono" });
+  var suspWhy = inp({ placeholder: "reason（会自动加 operator: 前缀）", class: "in mono" });
+  var actOut = h("div");
+  actS.body.appendChild(h("div", { class: "grid3" },
+    field("credits", grantIn), field("reason", grantWhy), field("idempotency_key", grantKey)));
+  actS.body.appendChild(h("div", { class: "row", style: "margin-top:10px" },
+    btn("赠送算力", function () {
+      var c = Number(grantIn.value) || 0;
+      if (c <= 0) { toast("credits 必须是正整数", "bad"); return Promise.reject(new ApiError("credits 无效", { status: 0, code: "console_validation" })); }
+      return call("billingGrant", { body: { credits: c, reason: grantWhy.value || "console_grant", idempotency_key: grantKey.value } })
+        .then(function (r) { actOut.appendChild(resultBox("赠送", r)); grantKey.value = ""; return refresh(); });
+    }, { tone: "pri", out: function () { return actOut; },
+         confirm: "赠送不产生激活码记录，属于人工调整。确认入账？" }),
+    btn("恢复在线", function () { return call("billingOnline").then(function (r) { actOut.appendChild(resultBox("已上线", r)); return refresh(); }); },
+      { out: function () { return actOut; }, confirm: "恢复在线后计量动作重新开始扣费。确认？" }),
+    btn("停用账户", function () {
+      return call("billingSuspend", { body: { reason: suspWhy.value || "manual" } })
+        .then(function (r) { actOut.appendChild(resultBox("已停用", r)); return refresh(); });
+    }, { tone: "dan", out: function () { return actOut; },
+         confirm: "停用会立刻熔断全部插件（不只是新卡片）。确认停用？" })));
+  actS.body.appendChild(h("div", { class: "grid3", style: "margin-top:10px" }, field("suspend reason", suspWhy)));
+  actS.body.appendChild(actOut);
+
+  refresh().catch(function (e) { renderError(host, e); });
+};
+
+/* ======================================================================== *
+ * 6g. 算力激活码
+ * ======================================================================== */
+
+VIEWS.vouchers = function (host) {
+  var redeemS = section("兑换算力", "先离线校验签名，再决定是否兑换");
+  var listS = section("激活码记录", "code 只显示头尾，避免截图泄露未兑换码");
+  var mintS = section("铸造", "私钥只存在于 official_tools/ 的 keyring，网关无法铸造");
+  [redeemS, listS, mintS].forEach(function (x) { host.appendChild(x.node); });
+
+  var codeIn = inp({ class: "in mono", placeholder: "POPX-CP-…", spellcheck: "false" });
+  var whoIn = inp({ placeholder: "redeemed_by（默认 console）", class: "in mono" });
+  var vOut = h("div");
+  redeemS.body.appendChild(field("code", codeIn, "空格与换行会被去掉；校验不消耗激活码"));
+  redeemS.body.appendChild(h("div", { class: "row", style: "margin-top:10px" },
+    btn("校验", function () {
+      return call("voucherVerify", { body: { code: codeIn.value.trim() } }).then(function (r) {
+        vOut.appendChild(verifyCard(r));
+      });
+    }, { tone: "pri", out: function () { return vOut; } }),
+    btn("兑换", function () {
+      return call("voucherVerify", { body: { code: codeIn.value.trim() } }).then(function (pre) {
+        vOut.appendChild(verifyCard(pre));
+        if (!pre.valid) { toast("签名或格式不成立，未提交兑换", "bad"); return null; }
+        if (!window.confirm("确认兑换：" + pre.voucher.plan + " · " + fmtInt(pre.voucher.credits) + " POPX-CP？兑换不可撤销。")) return null;
+        return call("voucherRedeem", { body: { code: codeIn.value.trim(), redeemed_by: whoIn.value || "console" } })
+          .then(function (r) {
+            vOut.appendChild(resultBox("兑换结果", r));
+            toast("已入账 " + fmtInt((r.result || {}).credits || 0) + " POPX-CP", "good");
+            codeIn.value = "";
+            return Promise.all([refresh(), loadAccount()]).then(function () { paintBar(); });
+          });
+      });
+    }, { tone: "pri", out: function () { return vOut; } }),
+    h("span", { class: "grow" }),
+    field("", whoIn)));
+  redeemS.body.appendChild(vOut);
+
+  function verifyCard(r) {
+    if (!r.valid) {
+      return h("div", { class: "errbox" },
+        h("div", { class: "em", text: "校验未通过：" + (r.rule || "unknown") }),
+        h("div", { class: "ec", text: r.detail || "" }));
+    }
+    var v = r.voucher || {};
+    return h("div", { class: "result" },
+      h("div", { class: "rh" }, h("b", { text: "签名有效 · " + lab("voucher_status", v.status) }),
+        chip(v.plan || "custom", "i"), h("span", { class: "grow" }),
+        h("span", { class: "num", text: fmtInt(v.credits) + " POPX-CP" })),
+      h("div", { class: "rb", style: "padding:10px 12px" }, kv([
+        ["voucher_id", h("span", { class: "mono", text: v.voucher_id })],
+        ["code", h("span", { class: "mono", text: short(v.code, 16, 8) })],
+        ["签发", v.issued_at_ms ? localDate(v.issued_at_ms) : "—"],
+        ["过期", v.expires_at_ms ? inOrAgo(v.expires_at_ms) : "长期有效"],
+        ["已用", v.redeemed_at_ms ? localDate(v.redeemed_at_ms) + " by " + (v.redeemed_by || "—") : "未兑换"],
+        ["issuer", h("span", { class: "mono", text: v.issuer_key_id || "—" })],
+        ["note", v.note || "—"]
+      ])));
+  }
+
+  var statusSel = sel([["", "全部状态"]].concat(VOUCHER_STATUS.map(function (s) { return [s, lab("voucher_status", s)]; })), { class: "in mini" });
+  listS.body.appendChild(h("div", { class: "row" }, statusSel,
+    btn("刷新", function () { return refresh(); }, { tone: "mini" }),
+    h("span", { class: "hint", text: "兑换一次即写入流水，重复提交同一码返回同一结果" })));
+  var listOut = h("div");
+  listS.body.appendChild(listOut);
+  statusSel.addEventListener("change", function () { refresh(); });
+
+  var cmd = "python3 official_tools/gen_voucher.py --mint --plan startup --qty 1 --keyring ./official_keys";
+  mintS.body.appendChild(h("div", { class: "row" },
+    sel([["startup", "startup"], ["commercial", "commercial"], ["flagship", "flagship"]], { class: "in mini", id: "planSel" }),
+    inp({ type: "number", value: "1", min: "1", max: "50", class: "in mini", id: "qtyIn" }),
+    inp({ type: "number", placeholder: "credits（留空则用套餐额度）", class: "in mini", id: "credIn" }),
+    inp({ type: "number", placeholder: "ttl-days", class: "in mini", id: "ttlIn" }),
+    copyBtn(function () { return buildCmd(); }, "复制命令")));
+  var mintOut = h("div");
+  function buildCmd() {
+    var parts = ["python3 official_tools/gen_voucher.py --mint",
+      "--plan " + String((document.getElementById("planSel") || {}).value || "startup"),
+      "--qty " + String((document.getElementById("qtyIn") || {}).value || "1"),
+      "--keyring ./official_keys"];
+    var c = (document.getElementById("credIn") || {}).value;
+    var t = (document.getElementById("ttlIn") || {}).value;
+    if (c) parts.push("--credits " + c);
+    if (t) parts.push("--ttl-days " + t);
+    return parts.join(" ");
+  }
+  mintS.body.appendChild(h("p", { class: "hint", text: "铸造出的 code 直接粘贴到上方「兑换」即可；也可交付给商家由其自然兑换。" }));
+  mintS.body.appendChild(mintOut);
+
+  async function refresh() {
+    var q = statusSel.value ? { status: statusSel.value } : null;
+    var r = await call("vouchers", { query: q });
+    clear(listOut);
+    listOut.appendChild(tableOf([
+      { label: "voucher_id", get: function (v) { return h("span", { class: "mono", title: v.voucher_id, text: short(v.voucher_id, 14, 5) }); } },
+      { label: "code", get: function (v) { return h("span", { class: "mono", title: v.code, text: v.code || "—" }); } },
+      { label: "套餐", k: "plan" },
+      { label: "算力", get: function (v) { return h("span", { class: "num", text: fmtInt(v.credits) }); } },
+      { label: "状态", get: function (v) { return chip(lab("voucher_status", v.status), v.status === "redeemed" ? "g" : v.status === "issued" ? "i" : "w"); } },
+      { label: "过期", get: function (v) { return v.expires_at_ms ? inOrAgo(v.expires_at_ms) : "长期"; } },
+      { label: "兑换于", get: function (v) { return v.redeemed_at_ms ? ago(v.redeemed_at_ms) : "—"; } },
+      { label: "兑换人", get: function (v) { return v.redeemed_by || "—"; } },
+      { label: "note", get: function (v) { return v.note || "—"; } }
+    ], r.vouchers || [], "（还没有激活码记录）"));
+    return r;
+  }
+  refresh().catch(function (e) { renderError(listOut, e); });
+};
+
+/* ======================================================================== *
+ * 6h. 插件控制台：AI 客服、告警运营
+ * ======================================================================== */
+
+function pluginHeader(key, statusKey) {
+  var meta = pluginMeta(key);
+  var s = section(meta.name, meta.id + " · 挂载于 " + meta.prefix + " · 计量 " + meta.meter);
+  var out = h("div");
+  function paint() {
+    var f = fuseOf(key);
+    clear(s.body);
+    s.body.appendChild(h("div", { class: "row" },
+      chip(f.mounted ? "模块已装载" : "模块未装载", f.mounted ? "g" : "b"),
+      chip("网关判定：" + f.label, f.usable ? "g" : (f.reason === "node_unreachable" ? "w" : "b")),
+      f.balance !== undefined && f.balance !== null ? chip("余额 " + fmtInt(f.balance), "i") : null,
+      h("span", { class: "grow" }),
+      statusKey ? btn("读取运行状态", function () {
+        return call(statusKey).then(function (r) { out.appendChild(resultBox(meta.name + " 状态", r)); return r; },
+          function (e) { out.appendChild(pluginStatusError(meta, e)); });
+      }, { tone: "mini pri", out: function () { return out; } }) : null,
+      /* 门禁判定实时读一次：顶栏那枚 chip 来自 15 秒一轮的 status，
+       * 刚充完值或刚打开开关时，运营需要立刻看到网关此刻的判断。 */
+      btn("读取网关判定", function () {
+        return call("pluginStatus", { params: { plugin_id: meta.id } }).then(function (r) {
+          out.appendChild(resultBox(meta.name + " 网关判定", r));
+          return loadStatus().then(function () { paintBar(); paintSide(); markActive(key); });
+        }, function (e) { out.appendChild(pluginStatusError(meta, e)); });
+      }, { tone: "mini gho", out: function () { return out; } })
+    ));
+    if (f.detail) s.body.appendChild(h("p", { class: f.usable ? "hint" : "warnline", text: f.detail }));
+    if (f.error) s.body.appendChild(h("p", { class: "warnline", text: "装载错误：" + f.error }));
+    s.body.appendChild(out);
+  }
+  paint();
+  return { node: s.node, paint: paint, out: out };
+}
+function pluginStatusError(meta, e) {
+  /* 503 常见于「插件功能上未开启」：模型密钥缺失等。响应体仍是 JSON，照原样显示。 */
+  var head = e.status === 503 ? "运行条件不足（HTTP 503）" : "读取失败（HTTP " + e.status + "）";
+  return h("div", { class: "errbox" },
+    h("div", { class: "em", text: meta.name + "：" + head }),
+    h("div", { class: "ec", text: e.message }),
+    e.payload ? pretty(e.payload) : (e.status === 404 ? h("p", { class: "hint", text: "404 通常是插件被关闭（POPOPX_PLUGIN_*）或未装载。" }) : null));
+}
+
+VIEWS.ai = function (host) {
+  var head = pluginHeader("ai", "aiStatus");
+  host.appendChild(head.node);
+  var runS = section("试聊", "与真实链路完全相同：门禁、计量、会话历史、节点投递");
+  var histS = section("历史与导出", "history_size 决定记住几轮；导出为 text/plain");
+  var cfgS = section("配置", "只有这 6 个键可以热改；api_key 与 endpoint 属环境变量，改动需要重启");
+  var stS = section("运行状态", "GET /api/v1/plugins/ai/status");
+  [runS, histS, cfgS, stS].forEach(function (x) { host.appendChild(x.node); });
+
+  var pick = targetsBox({ explicit: true });
+  var msgIn = area({ rows: 3, placeholder: "以粉丝身份发送一句话" });
+  var itemIn = inp({ class: "in mono", placeholder: "item_id（幂等标识，留空自动生成）" });
+  var runOut = h("div");
+  runS.body.appendChild(pick.node);
+  runS.body.appendChild(h("div", { class: "grid2", style: "margin-top:10px" }, field("内容", msgIn), field("item_id", itemIn)));
+  runS.body.appendChild(h("div", { class: "row", style: "margin-top:10px" },
+    btn("发送", function () {
+      var ids = pick.ids();
+      if (!ids.length) { toast("请选择一个联系人", "bad"); return Promise.reject(new ApiError("未选择联系人", { status: 0, code: "console_no_target" })); }
+      var body = { contact_id: ids[0], text: msgIn.value };
+      if (itemIn.value.trim()) body.item_id = Number(itemIn.value);
+      return call("aiChat", { body: body }).then(function (r) {
+        runOut.appendChild(resultBox("回复", r));
+        return Promise.all([loadAccount(), loadStatus()]).then(function () { paintBar(); head.paint(); });
+      }, function (e) {
+        runOut.appendChild(chatError(e));
+      });
+    }, { tone: "pri", out: function () { return runOut; } })));
+  runS.body.appendChild(runOut);
+
+  function chatError(e) {
+    var p = e.payload || {};
+    var status = p.status || e.code || "";
+    var why = {
+      rate_limited: "触发限速：" + (p.detail || "") + (p.retry_after_ms ? "，请等 " + rel(p.retry_after_ms) : ""),
+      duplicate: "同 item_id 已处理过（幂等保护，没有二次扣费）",
+      unknown_contact: "联系人不存在",
+      unconfigured: "模型未配置（POPOPX_AI_API_KEY / POPOPX_AI_BASE_URL）",
+      plugin_disabled: "插件被关闭",
+      node_down: "节点不可达，稍后重试",
+      billing_held: "算力不足或账户状态不允许",
+      send_refused: "节点拒绝投递（会话未建立？）",
+      notified: "余额耗尽，已发送耗尽提示而非模型回复"
+    };
+    return h("div", { class: "errbox" },
+      h("div", { class: "em", text: "本轮未回复：" + (status || e.message) }),
+      h("div", { class: "ec", text: "HTTP " + e.status + (why[status] ? " · " + why[status] : "") }),
+      pretty(p));
+  }
+
+  var hContact = sel([], {});
+  var hLimit = sel([[20, "最近 20 条"], [50, "最近 50 条"], [100, "最近 100 条"]], {});
+  var histOut = h("div");
+  function fillContactSel() {
+    clear(hContact);
+    STATE.contacts.forEach(function (c) {
+      hContact.appendChild(h("option", { value: String(c.contact_id), text: "#" + c.contact_id + " " + (c.local_display_name || c.display_name || "") }));
+    });
+    if (!STATE.contacts.length) hContact.appendChild(h("option", { value: "0", text: "（还没有联系人）" }));
+  }
+  histS.body.appendChild(h("div", { class: "row" }, hContact, hLimit,
+    btn("读取", function () { return loadHist(); }, { tone: "mini pri", out: function () { return histOut; } }),
+    btn("清空该联系人记忆", function () {
+      return call("aiHistoryDel", { query: { contact_id: hContact.value } }).then(function (r) {
+        histOut.appendChild(resultBox("已清空", r));
+        return loadHist();
+      });
+    }, { tone: "mini dan", out: function () { return histOut; },
+         confirm: "清空后该联系人重新从 system_prompt 开始。确认？" }),
+    btn("导出全文", function () {
+      return call("aiExport", { params: { contact_id: hContact.value }, raw: true }).then(function (r) {
+        if (r.status !== 200) { histOut.appendChild(h("div", { class: "errbox", text: "HTTP " + r.status + "：" + r.text })); return null; }
+        var blob = new Blob([r.text], { type: r.type || "text/plain" });
+        var a = h("a", { href: URL.createObjectURL(blob), download: "popopx-ai-" + hContact.value + ".txt" });
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        histOut.appendChild(h("p", { class: "hint", text: "已下载 " + bytes(r.text.length) + "（纯文本，最多 400 行）" }));
+        return null;
+      });
+    }, { tone: "mini", out: function () { return histOut; } })));
+  histS.body.appendChild(histOut);
+  histS.body.appendChild(h("p", { class: "hint", text: "导出接口返回 text/plain，不是 JSON；上限由 HISTORY_FETCH_CAP 决定。" }));
+  async function loadHist() {
+    var r = await call("aiHistory", { query: { contact_id: hContact.value, limit: Number(hLimit.value) || 20 } });
+    clear(histOut);
+    histOut.appendChild(tableOf([
+      { label: "时间", get: function (m) { return localDate(m.ts_ms).slice(5); } },
+      { label: "角色", get: function (m) { return chip(m.role, m.role === "assistant" ? "i" : ""); } },
+      { label: "内容", get: function (m) { return h("span", { title: m.content, text: String(m.content || "").slice(0, 160) }); } },
+      { label: "扣费", get: function (m) { return m.credits_charged ? cr(m.credits_charged) : "0"; } }
+    ], r.messages || [], "（无历史）"));
+    histOut.appendChild(h("p", { class: "hint", text: "count=" + r.count + "，本页显示 " + (r.messages || []).length + " 条。" }));
+    return r;
+  }
+
+  var cfgFields = {
+    system_prompt: area({ rows: 4, placeholder: "系统提示词（会随每轮请求发送）" }),
+    model: inp({ class: "in mono", placeholder: "gpt-4o-mini 之类" }),
+    exhausted_message: inp({ placeholder: "算力耗尽时回复的固定话术" }),
+    history_size: inp({ type: "number", min: "0", max: "50" }),
+    temperature: inp({ type: "number", min: "0", max: "2", step: "0.05" }),
+    max_tokens: inp({ type: "number", min: "1", max: "8000" })
+  };
+  cfgS.body.appendChild(h("div", { class: "grid2" },
+    field("system_prompt", cfgFields.system_prompt),
+    field("model", cfgFields.model),
+    field("exhausted_message", cfgFields.exhausted_message),
+    field("history_size", cfgFields.history_size, "0 表示完全不留记忆（隐私开关）"),
+    field("temperature", cfgFields.temperature, "0–2"),
+    field("max_tokens", cfgFields.max_tokens)));
+  var cfgOut = h("div");
+  cfgS.body.appendChild(h("div", { class: "row", style: "margin-top:10px" },
+    btn("保存配置", function () {
+      var body = {};
+      Object.keys(cfgFields).forEach(function (k) {
+        var v = cfgFields[k].value;
+        if (v === "" ) return;
+        body[k] = (k === "history_size" || k === "max_tokens") ? Number(v) : (k === "temperature" ? Number(v) : v);
+      });
+      if (!Object.keys(body).length) { toast("没有需要提交的字段", "bad"); return Promise.reject(new ApiError("空配置", { status: 0, code: "console_empty" })); }
+      return call("aiConfigure", { body: body }).then(function (r) { cfgOut.appendChild(resultBox("已保存（PATCH 语义，只改提交的键）", r)); return refreshStatus(); });
+    }, { tone: "pri", out: function () { return cfgOut; } }),
+    h("span", { class: "hint", text: "未知键会被 400 拒绝，不会静默忽略。" })));
+  cfgS.body.appendChild(cfgOut);
+
+  var knownSt = ["ok", "plugin", "meter", "reason", "gate", "enabled", "accepting", "model", "endpoint_configured",
+                 "endpoint_host", "endpoint_insecure_host", "api_key", "rate_limit", "credits_per_message",
+                 "history_size", "temperature", "max_tokens", "system_prompt_chars", "exhausted_message_chars", "reply_limit_chars"];
+  async function refreshStatus() {
+    var r;
+    try { r = await call("aiStatus"); }
+    catch (e) { if (e.payload) r = e.payload; else { clear(stS.body); stS.body.appendChild(pluginStatusError(pluginMeta("ai"), e)); return null; } }
+    clear(stS.body);
+    stS.body.appendChild(kv([
+      ["可受理", r.accepting ? chip("是", "g") : chip("否", "b")],
+      ["网关判定", chip(GATE_REASONS[r.reason] || r.reason || "—", r.enabled ? "g" : "w")],
+      ["model", h("span", { class: "mono", text: r.model || "—" })],
+      ["endpoint", h("span", { class: "mono", text: r.endpoint_host || (r.endpoint_configured ? "（已配置）" : "未配置") })],
+      ["密钥", r.api_key ? (r.api_key.present ? "已配置 " + r.api_key.chars + " 字符" : "缺失（在 .env 里设置 POPOPX_AI_API_KEY）") : "—"],
+      ["限速", r.rate_limit ? r.rate_limit.messages + " 条 / " + rel((r.rate_limit.window_seconds || 0) * 1000) : "—"],
+      ["单价", cr(r.credits_per_message)],
+      ["记忆轮数", String(r.history_size)],
+      ["temperature / max_tokens", String(r.temperature) + " / " + String(r.max_tokens)],
+      ["提示词长度", String(r.system_prompt_chars) + " 字符"],
+      ["回复上限", String(r.reply_limit_chars) + " 字符"]
+    ].concat(rest(r, knownSt))));
+    stS.body.appendChild(h("p", { class: "hint", text: "endpoint 主机若为明文 http，状态里会标注 endpoint_insecure_host。" }));
+    cfgFields.model.value = cfgFields.model.value || r.model || "";
+    cfgFields.history_size.value = String(r.history_size === undefined ? "" : r.history_size);
+    cfgFields.temperature.value = String(r.temperature === undefined ? "" : r.temperature);
+    cfgFields.max_tokens.value = String(r.max_tokens === undefined ? "" : r.max_tokens);
+    return r;
+  }
+
+  loadContacts().then(function () { fillContactSel(); }, function () { fillContactSel(); });
+  refreshStatus().catch(function (e) { renderError(stS.body, e); });
+};
+
+VIEWS.alerts = function (host) {
+  var head = pluginHeader("alerts", "alertsStatus");
+  host.appendChild(head.node);
+  var whS = section("接入告警", "POST /webhook：Alertmanager 格式，公开路径但需要独立令牌");
+  var tgS = section("接收人", "写入 settings 的 alert_ops.targets，与网关管理令牌无关");
+  var listS = section("告警", "确认与解决各自扣 alert 计量一次；重复提交同一动作不再扣费");
+  var detS = section("详情", "一条告警对应每位接收人一张卡");
+  [whS, tgS, listS, detS].forEach(function (x) { host.appendChild(x.node); });
+
+  var alertTok = inp({ class: "in mono", type: "password", placeholder: "POPOPX_ALERT_WEBHOOK_TOKEN" });
+  try { alertTok.value = sessionStorage.getItem("popopx.alert.token") || ""; } catch (e) { /* ignore */ }
+  var sample = {
+    alerts: [{
+      status: "firing",
+      labels: { alertname: "磁盘水位", severity: "warning", instance: "db-01" },
+      annotations: { summary: "/data 使用率 92%" },
+      startsAt: new Date(Date.now() - 60000).toISOString()
+    }
+    ]
+  };
+  var sampleIn = area({ rows: 10 });
+  sampleIn.value = dump(sample);
+  var whOut = h("div");
+  whS.body.appendChild(field("Webhook 令牌", alertTok, "只保存在本浏览器会话；未填写则只能复制 curl 模板"));
+  alertTok.addEventListener("change", function () {
+    try { sessionStorage.setItem("popopx.alert.token", alertTok.value.trim()); } catch (e) { /* ignore */ }
+  });
+  var curl = function () {
+    return ["curl -sS -X POST " + JSON.stringify(location.origin + API.alertWebhook[1]),
+      "  -H 'content-type: application/json'",
+      "  -H 'X-Popopx-Alert-Token: <POPOPX_ALERT_WEBHOOK_TOKEN>'",
+      "  -d '" + sampleIn.value.replace(/'/g, "'\\''") + "'"].join(" \\\n");
+  };
+  whS.body.appendChild(h("div", { class: "row" },
+    copyBtn(curl, "复制 curl"),
+    btn("修正示例时间戳", function () {
+      var obj = JSON.parse(sampleIn.value);
+      (obj.alerts || []).forEach(function (a) { a.startsAt = new Date().toISOString(); });
+      sampleIn.value = dump(obj);
+      toast("已刷新 startsAt", "good");
+      return null;
+    }, { tone: "mini gho" }),
+    btn("由控制台投递", function () {
+      if (!alertTok.value.trim()) { toast("需要 Webhook 令牌才能模拟外部系统", "bad"); return Promise.reject(new ApiError("缺少 webhook 令牌", { status: 0, code: "console_no_token" })); }
+      var obj;
+      try { obj = JSON.parse(sampleIn.value); } catch (e) { return Promise.reject(new ApiError("示例不是合法 JSON：" + e.message, { status: 0, code: "console_json" })); }
+      return call("alertWebhook", {
+        body: obj,
+        headers: { "X-Popopx-Alert-Token": alertTok.value.trim(), "authorization": "Bearer " + alertTok.value.trim() }
+      }).then(function (r) {
+        whOut.appendChild(resultBox("已投递", r));
+        return refreshList();
+      });
+    }, { tone: "pri", out: function () { return whOut; } })));
+  whS.body.appendChild(field("Alertmanager 载荷（≤256 KiB、≤50 条）", sampleIn));
+  whS.body.appendChild(whOut);
+  whS.body.appendChild(h("p", { class: "hint", text: "响应恒为 200，逐条结果在 results/counts 里；这是为了不让 Alertmanager 因 4xx 反复重试。" }));
+
+  var pick = targetsBox({ explicit: true });
+  var appendMode = chk("追加而不是替换", false);
+  var tgOut = h("div");
+  tgS.body.appendChild(pick.node);
+  tgS.body.appendChild(h("div", { class: "row", style: "margin-top:10px" },
+    appendMode.node,
+    btn("保存接收人", function () {
+      return call("alertTargetsSet", { body: { contact_ids: pick.ids(), append: appendMode.get() } })
+        .then(function (r) { tgOut.appendChild(resultBox("接收人", r)); return refreshTargets(); });
+    }, { tone: "pri", out: function () { return tgOut; },
+         confirm: appendMode.get() ? "追加到现有列表。确认？" : "将替换整个列表（含从 API 建立的订阅）。确认？" }),
+    btn("移除所选", function () {
+      return call("alertTargetsDel", { body: { contact_ids: pick.ids() } })
+        .then(function (r) { tgOut.appendChild(resultBox("已移除", r)); return refreshTargets(); });
+    }, { tone: "dan", out: function () { return tgOut; },
+         confirm: pick.ids().length ? "移除所选 " + pick.ids().length + " 人。确认？" : "未选择任何联系人：这将清空整个列表！确认清空？" }),
+    btn("读取", function () { return refreshTargets(); }, { tone: "gho", out: function () { return tgOut; } })));
+  var tgChips = h("div", { class: "row" });
+  tgS.body.appendChild(h("h4", { class: "sub", text: "当前列表" }));
+  tgS.body.appendChild(tgChips);
+  tgS.body.appendChild(tgOut);
+  function refreshTargets() {
+    return call("alertTargets").then(function (r) {
+      clear(tgChips);
+      if (!r.targets || !r.targets.length) tgChips.appendChild(h("span", { class: "empty", text: "（没有接收人：新告警不会投递卡片）" }));
+      (r.targets || []).forEach(function (id) {
+        var c = null;
+        for (var i = 0; i < STATE.contacts.length; i++) if (STATE.contacts[i].contact_id === id) c = STATE.contacts[i];
+        tgChips.appendChild(chip("#" + id + (c ? " " + (c.local_display_name || c.display_name || "") : ""), c && c.revoked ? "w" : ""));
+      });
+      if (r.warnings && r.warnings.length) tgChips.appendChild(h("span", { class: "warnline", text: r.warnings.join("；") }));
+      return r;
+    });
+  }
+
+  var fStatus = sel([["", "全部状态"]].concat(ALERT_STATUS.map(function (s) { return [s, lab("alert_status", s)]; })), { class: "in mini" });
+  var fSev = sel([["", "全部级别"]].concat(ALERT_SEVERITY.map(function (s) { return [s, lab("alert_severity", s) + " (" + s + ")"]; })), { class: "in mini" });
+  var fLim = sel([[30, "30 条"], [100, "100 条"], [200, "200 条"]], { class: "in mini" });
+  var listOut = h("div");
+  listS.body.appendChild(h("div", { class: "row" }, fStatus, fSev, fLim,
+    btn("查询", function () { return refreshList(); }, { tone: "mini pri", out: function () { return listOut; } }),
+    h("span", { class: "hint", text: "本接口返回告警历史，不是插件规格" })));
+  listS.body.appendChild(listOut);
+
+  var cols = [
+    { label: "级别", get: function (a) { return chip(lab("alert_severity", a.severity), a.severity === "critical" ? "b" : a.severity === "warning" ? "w" : ""); } },
+    { label: "状态", get: function (a) { return chip(lab("alert_status", a.status), a.status === "firing" ? "w" : a.status === "resolved" ? "g" : "i"); } },
+    { label: "标题", get: function (a) { return h("a", { href: "#", text: a.title || "（无标题）", on: { click: function (e) { e.preventDefault(); show(a.alert_id); } } }); } },
+    { label: "fingerprint", get: function (a) { return h("span", { class: "mono", title: a.fingerprint, text: short(a.fingerprint, 10, 4) }); } },
+    { label: "来源", k: "source" },
+    { label: "触发", get: function (a) { return ago(a.firing_at_ms); } },
+    { label: "确认", get: function (a) { return a.ack_at_ms ? ago(a.ack_at_ms) : "—"; } },
+    { label: "卡片", get: function (a) { return a.card_id ? chip("有", "g") : chip("无", "w"); } },
+    { label: "操作", get: function (a) {
+        var box = h("div", { class: "row" });
+        if (!a.terminal) {
+          box.appendChild(btn(a.status === "firing" ? "确认" : "解决", function () {
+            var key = a.status === "firing" ? "alertAck" : "alertResolve";
+            return call(key, { params: { alert_id: a.alert_id }, body: {} }).then(function (r) {
+              listOut.appendChild(resultBox((a.status === "firing" ? "已确认 " : "已解决 ") + short(a.alert_id, 10, 4), r));
+              return refreshList();
+            });
+          }, { tone: "mini", out: function () { return listOut; } }));
+        }
+        box.appendChild(btn("详情", function () { return show(a.alert_id); }, { tone: "mini gho" }));
+        return box;
+      } }
+  ];
+  async function refreshList() {
+    var q = { limit: Number(fLim.value) || 30 };
+    if (fStatus.value) q.status = fStatus.value;
+    if (fSev.value) q.severity = fSev.value;
+    var r = await call("alertList", { query: q });
+    clear(listOut);
+    listOut.appendChild(tableOf(cols, r.alerts || r.items || [], "（没有告警）"));
+    if (r.count !== undefined) listOut.appendChild(h("p", { class: "hint", text: "共 " + r.count + " 条" }));
+    return r;
+  }
+
+  async function show(alertId) {
+    var r = await call("alertGet", { params: { alert_id: alertId } });
+    var a = r.alert || {};
+    var card = r.card || {};
+    clear(detS.body);
+    detS.body.appendChild(kv([
+      ["alert_id", h("span", { class: "mono", text: a.alert_id })],
+      ["标题", a.title],
+      ["摘要", a.summary],
+      ["级别 / 状态", h("div", { class: "row" },
+        chip(lab("alert_severity", a.severity), a.severity === "critical" ? "b" : a.severity === "warning" ? "w" : ""),
+        chip(lab("alert_status", a.status), a.status === "firing" ? "w" : a.status === "resolved" ? "g" : "i"))],
+      ["labels", (function () {
+        var labels = parseJsonField(a.labels_json || a.labels, {}) || {};
+        var row = h("div", { class: "row" });
+        Object.keys(labels).forEach(function (k) { row.appendChild(chip(k + "=" + labels[k], "i")); });
+        return row.children.length ? row : "—";
+      })()],
+      ["触发 / 确认 / 解决", [a.firing_at_ms ? localDate(a.firing_at_ms) : null, a.ack_at_ms ? localDate(a.ack_at_ms) : null, a.resolved_at_ms ? localDate(a.resolved_at_ms) : null].filter(Boolean).join(" / ") || "—"],
+      ["确认人", a.ack_by_contact_id ? "#" + a.ack_by_contact_id : "—"],
+      ["card_id", h("span", { class: "mono", text: a.card_id || "—" })],
+      ["每位接收人的卡", (function () {
+        var map = r.cards || {};
+        var row = h("div", { class: "row" });
+        Object.keys(map).forEach(function (cid) { row.appendChild(chip("#" + cid + " → " + String(map[cid]).slice(0, 10) + "…", "")); });
+        return row.children.length ? row : "—";
+      })()]
+    ]));
+    detS.body.appendChild(h("div", { class: "row" },
+      a.status === "firing" ? btn("确认", function () {
+        return call("alertAck", { params: { alert_id: alertId }, body: {} }).then(function (r2) { detOut.appendChild(resultBox("已确认", r2)); return show(alertId); });
+      }, { tone: "pri", out: function () { return detOut; } }) : null,
+      a.status !== "resolved" ? btn("解决", function () {
+        return call("alertResolve", { params: { alert_id: alertId }, body: {} }).then(function (r2) { detOut.appendChild(resultBox("已解决", r2)); return show(alertId); });
+      }, { tone: "pri", out: function () { return detOut; } }) : null,
+      a.card_id ? btn("打开卡片历史", function () { location.hash = "#cards"; return null; }, { tone: "gho" }) : null,
+      btn("原始告警行", function () { detOut.appendChild(resultBox("alerts 行", a)); return null; }, { tone: "mini gho", out: function () { return detOut; } })));
+    if (Object.keys(card).length) {
+      detS.body.appendChild(h("h4", { class: "sub", text: "投递出去的卡片行（*_json 为存储原文）" }));
+      detS.body.appendChild(pretty(card));
+    }
+    var detOut = h("div");
+    detS.body.appendChild(detOut);
+    return r;
+  }
+
+  refreshList().catch(function (e) { renderError(listOut, e); });
+  refreshTargets().catch(function (e) { renderError(tgChips, e); });
+};
+
+/* ======================================================================== *
+ * 6i. 插件控制台：免密登录、投票
+ * ======================================================================== */
+
+VIEWS.sso = function (host) {
+  var head = pluginHeader("sso", "ssoStatus");
+  host.appendChild(head.node);
+  var newS = section("发起登录会话", "生成 popopx://sso?... 由客户端扫码；控制台只负责发起、观察与撤销");
+  var liveS = section("进行中的会话", "确认后的 token 只在本次响应里出现一次");
+  var rpS = section("RP 联调", "模拟商家服务端换凭证：这一步会消耗会话，真实登录请勿点");
+  var audS = section("审计", "GET /audit：最近 1–200 条会话");
+  [newS, liveS, rpS, audS].forEach(function (x) { host.appendChild(x.node); });
+
+  var rpUri = inp({ class: "in mono", placeholder: "https://app.example.com/sso/callback" });
+  var rpName = inp({ placeholder: "商家显示名（扫码后展示）" });
+  var scopeIn = inp({ class: "in mono", placeholder: "openid / profile / email（可选）" });
+  var nonceIn = inp({ class: "in mono", placeholder: "nonce（防重放，建议随机）" });
+  var svcUri = inp({ class: "in mono", placeholder: "服务号邀请地址（可选，默认用网关自身）" });
+  var created = null;
+  var newOut = h("div");
+  newS.body.appendChild(h("div", { class: "grid2" },
+    field("rp_uri", rpUri, "扫码后客户端回连的地址；必须是 https（本机调试可用 http://localhost）"),
+    field("rp_name", rpName), field("scope", scopeIn), field("nonce", nonceIn), field("service_uri", svcUri)));
+  newS.body.appendChild(h("div", { class: "row", style: "margin-top:10px" },
+    btn("生成会话", function () {
+      var body = { uri: rpUri.value.trim() };
+      if (rpName.value.trim()) body.name = rpName.value.trim();
+      if (scopeIn.value.trim()) body.scope = scopeIn.value.trim();
+      if (nonceIn.value.trim()) body.nonce = nonceIn.value.trim();
+      if (svcUri.value.trim()) body.service_uri = svcUri.value.trim();
+      if (!body.uri) { toast("需要 rp_uri", "bad"); return Promise.reject(new ApiError("缺少 uri", { status: 0, code: "console_missing_uri" })); }
+      return call("ssoCreate", { body: body }).then(function (r) {
+        created = r;
+        stopPoll();
+        renderCreated(r);
+        startPoll();
+        return r;
+      });
+    }, { tone: "pri", out: function () { return newOut; } })));
+  newS.body.appendChild(newOut);
+
+  function renderCreated(r) {
+    clear(newOut);
+    var payloadBox = h("div", { class: "result" },
+      h("div", { class: "rh" }, h("b", { text: "扫码载荷（交给扫码端，不要抓取）" }), h("span", { class: "grow" }),
+        copyBtn(function () { return r.qr_payload; }, "复制")),
+      h("div", { class: "rb", style: "padding:12px" }, h("code", { class: "mono", style: "font-size:13px;word-break:break-all", text: r.qr_payload })));
+    newOut.appendChild(payloadBox);
+    newOut.appendChild(kv([
+      ["session_id", h("span", { class: "mono", text: r.session_id })],
+      ["初始状态", chip(lab("sso_state", r.state), "w")],
+      ["有效期", rel((r.expires_at_ms || 0) - Date.now()) + "（" + r.ttl_seconds + " 秒）"],
+      ["回调", r.callback_kind]
+    ]));
+    newOut.appendChild(h("p", { class: "hint", text: "控制台按 20 秒间隔查询状态：本浏览器所在 IP 的查询限速是每分钟 3 次，而客户端 poll_interval_ms 是给原生 App 的。" }));
+  }
+
+  var pollTimer = null;
+  function stopPoll() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+  function startPoll() { if (!pollTimer) pollTimer = setInterval(function () { if (!document.hidden) poll(true); }, 20000); }
+  var liveOut = h("div");
+  liveS.body.appendChild(liveOut);
+  var manualId = inp({ class: "in mono", placeholder: "session_id" });
+  liveS.body.appendChild(h("div", { class: "row" }, manualId,
+    btn("查询", function () { return poll(false, manualId.value.trim()); }, { tone: "mini", out: function () { return liveOut; } }),
+    btn("撤销", function () {
+      return call("ssoCancel", { params: { session_id: manualId.value.trim() } }).then(function (r) {
+        liveOut.appendChild(resultBox("已撤销", r));
+        if (created && created.session_id === manualId.value.trim()) stopPoll();
+        return refreshAudit();
+      });
+    }, { tone: "mini dan", out: function () { return liveOut; } }),
+    btn("审计", function () { return refreshAudit(); }, { tone: "mini gho", out: function () { return audOut; } })));
+
+  async function poll(silent, id) {
+    var sid = id || (created && created.session_id);
+    if (!sid) { if (!silent) toast("没有可查询的会话", "bad"); return null; }
+    var r;
+    try { r = await call("ssoGet", { params: { session_id: sid } }); }
+    catch (e) { if (!silent) renderError(liveOut, e); return null; }
+    clear(liveOut);
+    var tone = r.state === "confirmed" || r.state === "delivered" ? "g" : (r.state === "expired" || r.state === "cancelled" ? "b" : "w");
+    liveOut.appendChild(h("div", { class: "row" },
+      h("span", { class: "chip " + tone, text: lab("sso_state", r.state) }),
+      h("span", { class: "mono hint", text: r.session_id }),
+      h("span", { class: "hint", text: "scanned " + (r.scanned ? "是" : "否") + " · approved " + (r.approved ? "是" : "否") }),
+      h("span", { class: "hint", text: "剩余 " + rel((r.expires_at_ms || 0) - Date.now()) })));
+    if (r.token) {
+      liveOut.appendChild(h("div", { class: "result", style: "margin-top:10px" },
+        h("div", { class: "rh" }, h("b", { text: "一次性凭证（仅此次查询返回）" }), h("span", { class: "grow" }), copyBtn(function () { return r.token; }, "复制")),
+        h("div", { class: "rb", style: "padding:12px" }, h("code", { class: "mono", style: "word-break:break-all", text: r.token }))));
+      rpSession.value = r.session_id;
+      rpToken.value = r.token;
+      if (!silent) toast("已确认：可复制到「RP 联调」验证（会消耗该会话）", "good");
+      if (created && created.session_id === r.session_id) { created.expires_at_ms = r.expires_at_ms; }
+    }
+    if (r.state === "expired" || r.state === "cancelled" || r.state === "delivered") stopPoll();
+    return r;
+  }
+
+  var rpSession = inp({ class: "in mono", placeholder: "session_id" });
+  var rpToken = inp({ class: "in mono", placeholder: "token" });
+  var rpOut = h("div");
+  rpS.body.appendChild(h("div", { class: "grid2" }, field("session_id", rpSession), field("token", rpToken)));
+  rpS.body.appendChild(h("div", { class: "row", style: "margin-top:10px" },
+    btn("换凭证", function () {
+      return call("ssoVerify", { body: { session_id: rpSession.value.trim(), token: rpToken.value.trim() } })
+        .then(function (r) { rpOut.appendChild(resultBox("签发成功", r)); return refreshAudit(); });
+    }, { tone: "pri", out: function () { return rpOut; },
+         confirm: "这一步会消耗该会话（一次性凭证）。若这是真实用户的登录，他将被迫重新扫码。确认继续？" })));
+  rpS.body.appendChild(h("p", { class: "hint", text: "失败一律 403，reason 区分：过期、已用、不匹配、被撤销、nonce 不符、签名不符。" }));
+  rpS.body.appendChild(rpOut);
+
+  var audLimit = sel([[20, "20 条"], [50, "50 条"], [200, "200 条"]], { class: "in mini" });
+  var audOut = h("div");
+  audS.body.appendChild(h("div", { class: "row" }, audLimit,
+    btn("刷新审计", function () { return refreshAudit(); }, { tone: "mini pri", out: function () { return audOut; } }),
+    h("span", { class: "hint", text: "pairwise_uid 只在已签发的会话上出现" })));
+  audS.body.appendChild(audOut);
+  function refreshAudit() {
+    return call("ssoAudit", { query: { limit: Number(audLimit.value) || 20 } }).then(function (r) {
+      clear(audOut);
+      audOut.appendChild(tableOf([
+        { label: "session", get: function (s) { return h("span", { class: "mono", title: s.session_id, text: short(s.session_id, 12, 4) }); } },
+        { label: "状态", get: function (s) { return chip(lab("sso_state", s.state), s.state === "confirmed" || s.state === "delivered" ? "g" : s.state === "expired" ? "w" : s.state === "cancelled" ? "b" : "i"); } },
+        { label: "存储态", get: function (s) { return s.stored_state || "—"; } },
+        { label: "rp", get: function (s) { return h("span", { class: "mono", title: s.rp_uri, text: short(s.rp_uri, 26, 6) }); } },
+        { label: "scope", get: function (s) { return s.scope || "—"; } },
+        { label: "联系人", get: function (s) { return s.contact_id ? "#" + s.contact_id : "—"; } },
+        { label: "创建", get: function (s) { return ago(s.created_at_ms); } },
+        { label: "扫码 → 确认", get: function (s) { return (s.scanned_at_ms ? ago(s.scanned_at_ms) : "—") + " → " + (s.confirmed_at_ms ? ago(s.confirmed_at_ms) : "—"); } },
+        { label: "操作", get: function (s) { return h("div", { class: "row" }, btn("查询", function () { return poll(false, s.session_id); }, { tone: "mini gho", out: function () { return liveOut; } })); } }
+      ], r.sessions || [], "（还没有登录会话）"));
+      audOut.appendChild(h("p", { class: "hint", text: "count=" + r.count + " · now_ms " + localDate(r.now_ms) }));
+      return r;
+    });
+  }
+  refreshAudit().catch(function (e) { renderError(audOut, e); });
+};
+
+VIEWS.polls = function (host) {
+  var head = pluginHeader("polls", "pollsStatus");
+  host.appendChild(head.node);
+  var newS = section("创建投票", "2–4 个选项；每个选项对应卡片上的一个按钮");
+  var listS = section("投票", "匿名模式的结果里不出现任何联系人标识");
+  var detS = section("结果", "选中左侧任一行");
+  [newS, listS, detS].forEach(function (x) { host.appendChild(x.node); });
+
+  var qIn = inp({ placeholder: "问题（同时作为卡片标题，≤120 字符）" });
+  var optsHost = h("div");
+  var modeSel = sel(POLL_MODES.map(function (m) { return [m, m === "anonymous" ? "anonymous（匿名）" : "signed（实名，可审计）"]; }), {});
+  var multiCk = chk("允许多选", false);
+  var endIn = inp({ type: "datetime-local" });
+  var pick = targetsBox({ explicit: true });
+  var newOut = h("div");
+  var options = ["", ""];
+  function paintOptions() {
+    clear(optsHost);
+    options.forEach(function (v, i) {
+      var box = inp({ value: v, placeholder: "选项 " + (i + 1) });
+      box.addEventListener("input", function () { options[i] = box.value; });
+      optsHost.appendChild(h("div", { class: "row", style: "margin-bottom:6px" }, box,
+        options.length > 2 ? btn("删除", function () { options.splice(i, 1); paintOptions(); return null; }, { tone: "mini dan" }) : null));
+    });
+    optsHost.appendChild(h("div", { class: "row" },
+      btn("+ 选项", function () {
+        if (options.length >= LIMITS.max_actions) { toast("选项上限 " + LIMITS.max_actions + " 个（卡片按钮上限）", "bad"); return null; }
+        options.push(""); paintOptions(); return null;
+      }, { tone: "mini" }), h("span", { class: "hint", text: "最少 2 个，最多 " + LIMITS.max_actions + " 个：超出会被 400 拒绝而不是截断" })));
+  }
+  newS.body.appendChild(field("question", qIn));
+  newS.body.appendChild(h("h4", { class: "sub", text: "选项" }));
+  newS.body.appendChild(optsHost);
+  newS.body.appendChild(h("div", { class: "grid3", style: "margin-top:10px" },
+    field("mode", modeSel), multiCk.node, field("结束时间", endIn, "留空即手动结束")));
+  newS.body.appendChild(h("h4", { class: "sub", text: "收件人（必须明确列出；留空即不发）" }));
+  newS.body.appendChild(pick.node);
+  newS.body.appendChild(h("div", { class: "row", style: "margin-top:10px" },
+    btn("创建并下发", function () {
+      var body = { question: qIn.value.trim(), options: options.map(function (o) { return o.trim(); }).filter(Boolean),
+                   mode: modeSel.value, multi: multiCk.get(), targets: pick.ids() };
+      if (!body.question) { toast("需要问题", "bad"); return Promise.reject(new ApiError("缺少 question", { status: 0, code: "console_missing_question" })); }
+      if (body.options.length < 2) { toast("至少两个非空选项", "bad"); return Promise.reject(new ApiError("选项不足", { status: 0, code: "console_options" })); }
+      if (!body.targets.length) toast("targets 为空：投票会被创建但不发给任何人", "bad");
+      var et = fromLocalInput(endIn.value);
+      if (et) body.ends_at_ms = et;
+      return call("pollsCreate", { body: body }).then(function (r) {
+        newOut.appendChild(h("div", {}, resultBox("创建结果", r),
+          tableOf([
+            { label: "联系人", get: function (d) { return "#" + d.contact_id; } },
+            { label: "card_id", get: function (d) { return h("span", { class: "mono", text: short(d.card_id, 14, 5) }); } },
+            { label: "结果", get: function (d) { return d.sent ? chip("已发送", "g") : d.queued ? chip("排队", "w") : chip("失败", "b"); } },
+            { label: "扣费", get: function (d) { return cr(d.charged); } },
+            { label: "错误", get: function (d) { return d.error || "—"; } }
+          ], r.deliveries || [], "（没有投递：targets 为空或被跳过）")));
+        if (r.skipped && r.skipped.length) newOut.appendChild(h("p", { class: "warnline", text: "跳过 " + r.skipped.length + " 人：" + dump(r.skipped).slice(0, 300) }));
+        return refreshList();
+      });
+    }, { tone: "pri", out: function () { return newOut; } }),
+    btn("重置", function () { qIn.value = ""; options = ["", ""]; endIn.value = ""; multiCk.set(false); paintOptions(); return null; }, { tone: "gho" })));
+  newS.body.appendChild(newOut);
+  paintOptions();
+
+  var listOut = h("div");
+  listS.body.appendChild(listOut);
+  var cols = [
+    { label: "poll_id", get: function (p) { return h("a", { href: "#", class: "mono", text: short(p.poll_id, 14, 4), on: { click: function (e) { e.preventDefault(); show(p.poll_id); } } }); } },
+    { label: "问题", get: function (p) { return p.question; } },
+    { label: "模式", get: function (p) { return chip(p.mode, p.mode === "signed" ? "i" : ""); } },
+    { label: "多选", get: function (p) { return p.multi ? "是" : "否"; } },
+    { label: "状态", get: function (p) { return chip(p.closed ? "已结束" : "进行中", p.closed ? "" : "g"); } },
+    { label: "票数", get: function (p) { return h("span", { class: "num", text: String(p.total_votes === undefined ? "—" : p.total_votes) }); } },
+    { label: "结束", get: function (p) { return p.ends_at_ms ? inOrAgo(p.ends_at_ms) : "手动"; } },
+    { label: "创建", get: function (p) { return ago(p.created_at_ms); } },
+    { label: "操作", get: function (p) {
+        return h("div", { class: "row" },
+          btn("结果", function () { return show(p.poll_id); }, { tone: "mini" }),
+          p.closed ? btn("重开", function () {
+            return call("pollReopen", { params: { poll_id: p.poll_id }, body: {} }).then(function (r) { listOut.appendChild(resultBox("已重开", r)); return refreshList(); });
+          }, { tone: "mini", out: function () { return listOut; } })
+          : btn("结束", function () {
+              return call("pollClose", { params: { poll_id: p.poll_id }, body: {} }).then(function (r) { listOut.appendChild(resultBox("已结束", r)); return refreshList(); });
+            }, { tone: "mini dan", out: function () { return listOut; } }),
+          btn("重发卡片", function () {
+            return call("pollRefresh", { params: { poll_id: p.poll_id }, body: {} }).then(function (r) { listOut.appendChild(resultBox("已重发", r)); });
+          }, { tone: "mini gho", out: function () { return listOut; },
+               confirm: "重发会为仍在管的人再下发一次卡片（按 card 计量）。确认？" }));
+      } }
+  ];
+  function refreshList() {
+    return call("pollsList").then(function (r) {
+      clear(listOut);
+      listOut.appendChild(tableOf(cols, r.polls || [], "（还没有投票）"));
+      if (r.state_filter) listOut.appendChild(h("p", { class: "hint", text: "state_filter=" + dump(r.state_filter) }));
+      return r;
+    });
+  }
+
+  async function show(pollId) {
+    var res = await call("pollResults", { params: { poll_id: pollId } });
+    var poll = res.poll || {};
+    var counts = poll.counts || res.counts || {};
+    var pct = poll.percentages || res.percentages || {};
+    clear(detS.body);
+    detS.body.appendChild(kv([
+      ["poll_id", h("span", { class: "mono", text: poll.poll_id || pollId })],
+      ["问题", poll.question],
+      ["模式", chip(poll.mode, poll.mode === "signed" ? "i" : "") + (poll.multi ? " · 多选" : "")],
+      ["状态", poll.closed ? "已结束" : "进行中"],
+      ["总票数", h("span", { class: "num", text: fmtInt(poll.total_votes) })],
+      ["结束", poll.ends_at_ms ? localDate(poll.ends_at_ms) : "手动结束"]
+    ]));
+    (poll.options || res.options || []).forEach(function (opt, i) {
+      var c = n(counts[i] === undefined ? counts[opt] : counts[i]);
+      var p = n(pct[i] === undefined ? pct[opt] : pct[i]);
+      detS.body.appendChild(h("div", { class: "item" },
+        h("div", { class: "ih" }, h("span", { class: "t", text: opt }),
+          h("span", { class: "sp" }, h("span", { class: "num chip", text: fmtInt(c) + " 票 · " + p + "%" }))),
+        bar(p)));
+    });
+    var voters = res.voters || poll.voters || [];
+    if (voters.length) {
+      detS.body.appendChild(h("h4", { class: "sub", text: "投票人（signed 模式）" }));
+      detS.body.appendChild(tableOf([
+        { label: "联系人", get: function (v) { return "#" + v.contact_id; } },
+        { label: "选择", get: function (v) { var o = (poll.options || [])[v.choice_index]; return (o || v.choice_index) + ""; } }
+      ], voters, "（无）"));
+      if (res.voters_truncated) detS.body.appendChild(h("p", { class: "warnline", text: "投票人列表已被截断，总数见总票数。" }));
+    } else {
+      detS.body.appendChild(h("p", { class: "hint", text: "匿名模式不返回任何投票人标识，这是设计而不是缺失。" }));
+    }
+    var extra = h("div");
+    detS.body.appendChild(h("div", { class: "row", style: "margin-top:10px" },
+      btn("查看投票对象", function () { return call("pollGet", { params: { poll_id: pollId } }).then(function (r) { extra.appendChild(resultBox("poll", r)); }); }, { tone: "mini gho", out: function () { return extra; } }),
+      btn("刷新", function () { return show(pollId); }, { tone: "mini" })));
+    detS.body.appendChild(extra);
+    return res;
+  }
+
+  loadContacts().catch(function () { /* 联系人读取失败时仍可手动填写 */ });
+  refreshList().catch(function (e) { renderError(listOut, e); });
+};
+
+/* ======================================================================== *
+ * 6j. 插件控制台：Web3 桥
+ * ======================================================================== */
+
+VIEWS.web3 = function (host) {
+  var head = pluginHeader("web3", "web3Status");
+  host.appendChild(head.node);
+  var wS = section("监听地址", "(chain, address) 唯一：重复提交是同一条更新并重新启用");
+  var wlS = section("白名单", "声明「这个链上地址属于本频道成员」，用于把收款关联到人");
+  var evS = section("链上事件", "金额一律是主单位小数的字符串，不做浮点");
+  [wS, wlS, evS].forEach(function (x) { host.appendChild(x.node); });
+
+  var chainOpts = WEB3_CHAINS.map(function (c) { return [c, c]; });
+  var addrHint = function (chain) {
+    return chain === "evm" ? "0x + 40 位十六进制" : "Base58，3–44 位";
+  };
+  function channelSelect(id) {
+    var node = sel([], { class: "in", id: id || "" });
+    (STATE.channels || []).forEach(function (c) {
+      node.appendChild(h("option", { value: c.channel_id, text: c.channel_id + " · " + (c.title || "") }));
+    });
+    if (!(STATE.channels || []).length) node.appendChild(h("option", { value: "", text: "（还没有频道：先到频道页创建）" }));
+    return node;
+  }
+
+  var wChain = sel(chainOpts, {});
+  var wAddr = inp({ class: "in mono", placeholder: "合约或账户地址" });
+  var wLabel = inp({ placeholder: "备注名" });
+  var wChannel = channelSelect();
+  var wMin = inp({ class: "in mono", placeholder: "0.001", type: "text" });
+  var wSymbol = inp({ class: "in mono", placeholder: "USDT / SOL（可选）" });
+  var wDecimals = inp({ type: "number", min: "0", max: "36", placeholder: "18" });
+  var wToken = inp({ class: "in mono", placeholder: "ERC20 / SPL 代币合约（可选）" });
+  var wAdv = chk("展开代币参数", false);
+  var advHost = h("div");
+  var wOut = h("div");
+  wS.body.appendChild(h("div", { class: "grid3" },
+    field("chain", wChain, addrHint(wChain.value)),
+    field("address", wAddr), field("label", wLabel),
+    field("channel_id（必填）", wChannel, "通知发到频道，收款归属也按频道判断"),
+    field("min_delta（主单位）", wMin, "留空即任何变动都通知"),
+    wAdv.node));
+  wS.body.appendChild(advHost);
+  function paintAdv() {
+    clear(advHost);
+    if (!wAdv.get()) return;
+    advHost.appendChild(h("div", { class: "grid3", style: "margin-top:8px" },
+      field("symbol", wSymbol), field("decimals", wDecimals, "EVM 代币精度；SOL 固定 9"),
+      field("token", wToken, "监听代币账户时必须填，且不能等于 address")));
+  }
+  wAdv.box.addEventListener("change", paintAdv);
+  wChain.addEventListener("change", function () { fieldLabelOf(wChain).textContent = addrHint(wChain.value); });
+  function fieldLabelOf(node) {
+    var label = node.closest("label");
+    return label ? label.querySelector("span.fl") : node;
+  }
+  wS.body.appendChild(h("div", { class: "row", style: "margin-top:10px" },
+    btn("保存监听", function () {
+      var body = { chain: wChain.value, address: wAddr.value.trim(), channel_id: wChannel.value };
+      if (wLabel.value.trim()) body.label = wLabel.value.trim();
+      if (String(wMin.value || "").trim()) body.min_delta = String(wMin.value).trim();
+      if (wAdv.get()) {
+        if (wSymbol.value.trim()) body.symbol = wSymbol.value.trim();
+        if (String(wDecimals.value || "").trim()) body.decimals = Number(wDecimals.value);
+        if (wToken.value.trim()) body.token = wToken.value.trim();
+      }
+      if (!body.address) { toast("需要 address", "bad"); return Promise.reject(new ApiError("缺少 address", { status: 0, code: "console_missing_address" })); }
+      if (!body.channel_id) { toast("需要 channel_id", "bad"); return Promise.reject(new ApiError("缺少频道", { status: 0, code: "console_missing_channel" })); }
+      return call("web3WatcherAdd", { body: body }).then(function (r) {
+        wOut.appendChild(resultBox((r.watcher || {}).created ? "已新增监听" : "已更新监听", r));
+        if (r.warnings && r.warnings.length) toast("配置提示：" + r.warnings.join("；"), "bad");
+        return refreshWatchers();
+      });
+    }, { tone: "pri", out: function () { return wOut; } })));
+  var wList = h("div");
+  wS.body.appendChild(h("h4", { class: "sub", text: "当前监听" }));
+  wS.body.appendChild(wList);
+  wS.body.appendChild(wOut);
+
+  function refreshWatchers() {
+    return call("web3Watchers").then(function (r) {
+      clear(wList);
+      wList.appendChild(tableOf([
+        { label: "id", get: function (w) { return h("span", { class: "num", text: String(w.id === undefined ? w.watch_id : w.id) }); } },
+        { label: "chain", k: "chain" },
+        { label: "address", get: function (w) { return h("span", { class: "mono", title: w.address, text: short(w.address, 10, 6) }); } },
+        { label: "备注", k: "label" },
+        { label: "频道", get: function (w) { return h("span", { class: "mono", text: w.channel_id || "—" }); } },
+        { label: "阈值", get: function (w) { return w.min_delta === null || w.min_delta === undefined ? "任何变动" : String(w.min_delta); } },
+        { label: "代币", get: function (w) { return w.symbol ? w.symbol + " (" + w.decimals + ")" : "—"; } },
+        { label: "启用", get: function (w) { return w.active ? chip("是", "g") : chip("否", "w"); } },
+        { label: "最近块", get: function (w) { return h("span", { class: "num", text: String(w.last_block === null || w.last_block === undefined ? "—" : w.last_block) }); } },
+        { label: "统计", get: function (w) { return w.stats ? chip((w.stats.events || 0) + " 事件 / " + (w.stats.notified || 0) + " 通知", "") : "—"; } },
+        { label: "操作", get: function (w) {
+            var id = w.id === undefined ? w.watch_id : w.id;
+            return h("div", { class: "row" },
+              btn(w.active ? "停用" : "启用", function () {
+                return call("web3WatcherPatch", { params: { watch_id: id }, body: { active: !w.active } })
+                  .then(function (r) { wOut.appendChild(resultBox("已更新", r)); return refreshWatchers(); });
+              }, { tone: "mini", out: function () { return wOut; } }),
+              btn("改名", function () {
+                var value = window.prompt("新的备注名：", w.label || "");
+                if (value === null) return null;
+                return call("web3WatcherPatch", { params: { watch_id: id }, body: { label: value } })
+                  .then(function (r) { wOut.appendChild(resultBox("已更新", r)); return refreshWatchers(); });
+              }, { tone: "mini gho", out: function () { return wOut; } }),
+              btn("删除", function () {
+                return call("web3WatcherDel", { params: { watch_id: id } })
+                  .then(function (r) { wOut.appendChild(resultBox("已停用（记录保留）", r)); return refreshWatchers(); });
+              }, { tone: "mini dan", out: function () { return wOut; },
+                   confirm: "该接口只把监听置为停用：chain 与 address 不可改，历史事件保留。确认？" }));
+          } }
+      ], r.watchers || [], "（还没有监听）"));
+      return r;
+    });
+  }
+
+  var lChain = sel(chainOpts, {});
+  var lAddr = inp({ class: "in mono", placeholder: addrHint("evm") });
+  var lChannel = channelSelect();
+  var lTag = inp({ placeholder: "tag（例如 主账户）" });
+  var lOut = h("div");
+  wlS.body.appendChild(h("div", { class: "grid3" }, field("chain", lChain), field("address", lAddr), field("channel_id", lChannel), field("tag", lTag)));
+  wlS.body.appendChild(h("div", { class: "row", style: "margin-top:10px" },
+    btn("声明归属", function () {
+      var body = { chain: lChain.value, address: lAddr.value.trim(), channel_id: lChannel.value };
+      if (lTag.value.trim()) body.tag = lTag.value.trim();
+      if (!body.address || !body.channel_id) { toast("address 与 channel_id 都必填", "bad"); return Promise.reject(new ApiError("字段缺失", { status: 0, code: "console_missing_field" })); }
+      return call("web3WhitelistAdd", { body: body }).then(function (r) {
+        lOut.appendChild(resultBox("已声明", r));
+        var kg = r.key_grant || {};
+        if (kg.pending) toast("密钥待下发：轮询循环会在频道 epoch 更新时交付（提交白名单本身不是轮换）", "bad");
+        return refreshWhitelist();
+      });
+    }, { tone: "pri", out: function () { return lOut; } }),
+    btn("移除所选", function () {
+      var addr = window.prompt("要移除的地址（响应里地址是截断显示）：", "");
+      if (!addr) return null;
+      return call("web3WhitelistDel", { query: { chain: lChain.value, address: addr.trim() } })
+        .then(function (r) { lOut.appendChild(resultBox("已移除", r)); return refreshWhitelist(); });
+    }, { tone: "dan", out: function () { return lOut; },
+         confirm: "移除后该链上地址不再关联到本频道成员。确认？" })));
+  var lList = h("div");
+  wlS.body.appendChild(lList);
+  wlS.body.appendChild(lOut);
+  function refreshWhitelist() {
+    return call("web3Whitelist", { query: { chain: lChain.value } }).then(function (r) {
+      clear(lList);
+      lList.appendChild(tableOf([
+        { label: "chain", k: "chain" },
+        { label: "address", get: function (e) { return h("span", { class: "mono", title: e.address, text: e.address }); } },
+        { label: "频道", get: function (e) { return h("span", { class: "mono", text: e.channel_id || "—" }); } },
+        { label: "tag", k: "tag" },
+        { label: "授予 epoch", get: function (e) { return String(e.granted_epoch === null || e.granted_epoch === undefined ? "待下发" : e.granted_epoch); } },
+        { label: "添加于", get: function (e) { return ago(e.created_at_ms); } }
+      ], r.whitelist || [], "（该链下还没有白名单）"));
+      return r;
+    });
+  }
+  lChain.addEventListener("change", function () { refreshWhitelist().catch(function (e) { renderError(lList, e); }); });
+
+  var eChain = sel([["", "全部链"]].concat(WEB3_CHAINS.map(function (c) { return [c, c]; })), { class: "in mini" });
+  var eAddr = inp({ class: "in mono mini", placeholder: "按地址过滤", style: "width:auto;min-width:180px" });
+  var eLim = sel([[50, "50 条"], [200, "200 条"]], { class: "in mini" });
+  var eNot = sel([["", "全部"], ["1", "仅已通知"], ["0", "仅未通知"]], { class: "in mini" });
+  var eList = h("div");
+  evS.body.appendChild(h("div", { class: "row" }, eChain, eAddr, eLim, eNot,
+    btn("查询", function () { return refreshEvents(); }, { tone: "mini pri", out: function () { return eList; } })));
+  evS.body.appendChild(eList);
+  function refreshEvents() {
+    var q = { limit: Number(eLim.value) || 50 };
+    if (eChain.value) q.chain = eChain.value;
+    if (String(eAddr.value || "").trim()) q.address = eAddr.value.trim();
+    if (eNot.value) q.notified = eNot.value;
+    return call("web3Events", { query: q }).then(function (r) {
+      clear(eList);
+      eList.appendChild(tableOf([
+        { label: "时间", get: function (e) { return localDate(e.observed_at_ms).slice(5); } },
+        { label: "chain", k: "chain" },
+        { label: "地址", get: function (e) { return h("span", { class: "mono", title: e.address, text: short(e.address, 8, 5) }); } },
+        { label: "方向", get: function (e) { return chip(e.direction, e.direction === "in" ? "g" : "w"); } },
+        { label: "资产", get: function (e) { return e.asset || "原生币"; } },
+        { label: "金额", get: function (e) { return h("span", { class: "num", text: String(e.amount) }); } },
+        { label: "区块", get: function (e) { return h("span", { class: "num", text: String(e.block_number) }); } },
+        { label: "交易", get: function (e) { return h("span", { class: "mono", title: e.tx_hash, text: short(e.tx_hash, 10, 6) }); } },
+        { label: "通知", get: function (e) { return e.notified ? chip("已通知", "g") : chip("未通知", "w"); } }
+      ], r.events || [], "（没有事件）"));
+      return r;
+    });
+  }
+
+  loadChannels().then(function () {
+    /* 频道列表晚于表单渲染到达时补一次选项 */
+    [wChannel, lChannel].forEach(function (node) {
+      var keep = node.value;
+      var fresh = channelSelect();
+      while (fresh.firstChild) node.appendChild(fresh.firstChild);
+      if (keep) node.value = keep;
+    });
+    refreshWatchers().catch(function (e) { renderError(wList, e); });
+    refreshWhitelist().catch(function (e) { renderError(lList, e); });
+    refreshEvents().catch(function (e) { renderError(eList, e); });
+  }, function () {
+    refreshWatchers().catch(function (e) { renderError(wList, e); });
+  });
+};
+
+/* ======================================================================== *
+ * 6k. 运维：出站队列、回调、设置、诊断
+ * ======================================================================== */
+
+VIEWS.outbox = function (host) {
+  var statS = section("队列统计", "queued 帧未扣费：abandon 不退款");
+  var queueS = section("待发送与失败", "按最旧优先排空，粉丝等待的卡片不会被后来的广播插队");
+  [statS, queueS].forEach(function (x) { host.appendChild(x.node); });
+
+  var out = h("div");
+  queueS.body.appendChild(out);
+  var kindSel = sel([["", "全部帧"]].concat(["handshake", "menu", "card", "card_update", "channel_key", "text", "article"].map(function (k) { return [k, k]; })), { class: "in mini" });
+  function render(r) {
+    var s = r.stats || {};
+    clear(statS.body);
+    statS.body.appendChild(h("div", { class: "reps" },
+      statCard("queued", fmtInt(s.queued), s.oldest_queued_ms ? "最早 " + ago(s.oldest_queued_ms) : "空闲"),
+      statCard("in_flight", fmtInt(s.in_flight), "本进程正在发送"),
+      statCard("sent", fmtInt(s.sent), ""),
+      statCard("failed", fmtInt(s.failed), "attempts 达 " + "8 次会转 abandoned"),
+      statCard("abandoned", fmtInt(s.abandoned), "")));
+    clear(out);
+    out.appendChild(tableOf([
+      { label: "id", k: "id", cls: "num" },
+      { label: "入队", get: function (q) { return ago(q.ts_ms); } },
+      { label: "帧", get: function (q) { return chip(q.frame_kind, q.frame_kind === "card" ? "i" : ""); } },
+      { label: "联系人", get: function (q) { return "#" + q.contact_id; } },
+      { label: "card_id", get: function (q) { return q.card_id ? h("span", { class: "mono", title: q.card_id, text: short(q.card_id, 10, 4) }) : "—"; } },
+      { label: "状态", get: function (q) { return chip(q.status, q.status === "queued" ? "i" : q.status === "sent" ? "g" : q.status === "failed" ? "w" : q.status === "abandoned" ? "b" : ""); } },
+      { label: "尝试", get: function (q) { return h("span", { class: "num", text: String(q.attempts) }); } },
+      { label: "预扣", get: function (q) { return q.credits_charged ? cr(q.credits_charged) : "0"; } },
+      { label: "corr", get: function (q) { return q.corr_id ? h("span", { class: "mono", text: short(q.corr_id, 8, 4) }) : "—"; } },
+      { label: "错误", get: function (q) { return q.last_error ? h("span", { title: q.last_error, text: String(q.last_error).slice(0, 46) }) : "—"; } },
+      { label: "操作", get: function (q) {
+          var box = h("div", { class: "row" });
+          box.appendChild(btn("看帧", function () {
+            var parsed = parseJsonField(q.body, null);
+            return Promise.resolve(h("div", {}, h("h4", { class: "sub", text: "outbox #" + q.id }),
+              parsed === null ? h("pre", { class: "dump", text: String(q.body || "") }) : pretty(parsed),
+              h("p", { class: "hint", text: "body 是密封后的 ECO 帧，不含明文；要读内容看对应卡片。" })));
+          }, { tone: "mini gho" }));
+          if (q.status === "queued") {
+            box.appendChild(btn("放弃", function () {
+              return call("outboxDelete", { params: { outbox_id: q.id } }).then(function (r) { out.appendChild(resultBox("已放弃 #" + q.id, r)); return refresh(); });
+            }, { tone: "mini dan", out: function () { return out; }, confirm: "放弃后该帧不再发送，也不退款（本来就没扣）。确认？" }));
+          } else if (q.status === "failed" || q.status === "abandoned") {
+            box.appendChild(btn("重试", function () {
+              return call("outboxRetry", { params: { outbox_id: q.id } }).then(function (r) { out.appendChild(resultBox("已重新入队 #" + q.id, r)); return refresh(); });
+            }, { tone: "mini", out: function () { return out; } }));
+          }
+          return box;
+        } }
+    ], (r.queued || []).filter(function (q) { return !kindSel.value || q.frame_kind === kindSel.value; }), "（队列为空）"));
+    out.appendChild(h("p", { class: "hint", text: "本表最多显示 200 行（服务端上限）。" }));
+    return r;
+  }
+  var drainOut = h("div");
+  statS.body.appendChild(h("div", { class: "row", style: "margin-top:12px" }, kindSel,
+    btn("立即排空", function () { return call("outboxDrain").then(function (r) { drainOut.appendChild(resultBox("排空", r)); return refresh(); }); }, { tone: "pri", out: function () { return drainOut; } }),
+    btn("刷新", function () { return refresh(); }, { tone: "gho" })));
+  statS.body.appendChild(drainOut);
+  kindSel.addEventListener("change", function () { call("outbox").then(render); });
+  function refresh() { return call("outbox").then(render); }
+  refresh().catch(function (e) { renderError(out, e); });
+};
+
+VIEWS.callbacks = function (host) {
+  var s = section("入站回调", "先记录再处理：节点重投递不会二次扣费");
+  var u = section("未匹配的回调", "这是「按钮没接线」的唯一可见证据");
+  host.appendChild(s.node); host.appendChild(u.node);
+  var out = h("div"), outU = h("div");
+  s.body.appendChild(out); u.body.appendChild(outU);
+
+  var kindIn = inp({ class: "in mini", placeholder: "kind（card_callback / text / sso_scan / system…）" });
+  var statusSel = sel([["", "全部"], ["handled", "handled"], ["unmatched", "unmatched"], ["error", "error"], ["duplicate", "duplicate"]], { class: "in mini" });
+  var limSel = sel([[50, "50 条"], [200, "200 条"], [500, "500 条"]], { class: "in mini" });
+  function colsFor(plain) {
+    return [
+      { label: "时间", get: function (c) { return localDate(c.ts_ms).slice(5); } },
+      { label: "联系人", get: function (c) { return "#" + c.contact_id; } },
+      { label: "kind", get: function (c) { return chip(c.kind, c.kind === "card_callback" ? "i" : ""); } },
+      { label: "marker", get: function (c) { return h("span", { class: "mono", title: c.marker, text: short(c.marker, 16, 4) }); } },
+      { label: "payload", get: function (c) { return h("span", { class: "mono", title: c.payload, text: short(c.payload, 24, 6) }); } },
+      { label: "状态", get: function (c) { return chip(c.status, c.status === "handled" ? "g" : c.status === "unmatched" ? "w" : c.status === "duplicate" ? "i" : "b"); } },
+      { label: "处理器", get: function (c) { return c.handler || "—"; } },
+      { label: "paid_ref", get: function (c) { return h("span", { class: "mono", text: c.paid_ref || "—" }); } },
+      { label: "错误", get: function (c) { return c.error || "—"; } }
+    ].concat(plain ? [] : [
+      { label: "操作", get: function (c) {
+          return btn("原始行", function () {
+            return Promise.resolve(resultBox("callback #" + c.id, c));
+          }, { tone: "mini gho" });
+        } }
+    ]);
+  }
+  s.body.insertBefore(h("div", { class: "row" }, kindIn, statusSel, limSel,
+    btn("查询", function () { return load(); }, { tone: "mini pri", out: function () { return out; } })), out);
+  u.body.appendChild(h("p", { class: "hint", text: "unmatched 表示网关收到了但没有任何插件认领这个 payload：检查菜单/卡片按钮的 callback 标识拼写。" }));
+
+  function load() {
+    var q = { limit: Number(limSel.value) || 50 };
+    if (String(kindIn.value || "").trim()) q.kind = kindIn.value.trim();
+    if (statusSel.value) q.status = statusSel.value;
+    return call("callbacks", { query: q }).then(function (r) {
+      var rows = r.callbacks || [];
+      clear(out);
+      out.appendChild(tableOf(colsFor(false), rows, "（还没有回调）"));
+      var unmatched = rows.filter(function (c) { return c.status === "unmatched"; });
+      clear(outU);
+      outU.appendChild(tableOf(colsFor(true), unmatched, "（本批没有 unmatched；换筛选条件可扩大范围）"));
+      return r;
+    });
+  }
+  load().catch(function (e) { renderError(out, e); });
+};
+
+VIEWS.settings = function (host) {
+  var s = section("可编辑设置", "白名单只有这两个键；其余配置都在 .env，改动需要重启");
+  host.appendChild(s.node);
+  var out = h("div");
+  var auto = chk("自动接受新的联系人申请", false);
+  var welcome = area({ rows: 4, placeholder: "新联系人建立会话后自动发送的欢迎语（留空即不发）" });
+  s.body.appendChild(h("div", { class: "grid2" },
+    field(SETTING_LABELS["gateway.auto_accept"], auto.node),
+    field(SETTING_LABELS["gateway.welcome_text"], welcome)));
+  s.body.appendChild(h("div", { class: "row", style: "margin-top:10px" },
+    btn("保存自动接受", function () {
+      return call("settingPut", { params: { key: "gateway.auto_accept" }, body: { value: auto.get() } })
+        .then(function (r) { out.appendChild(resultBox("已保存", r)); return load(); });
+    }, { out: function () { return out; }, tone: "pri" }),
+    btn("保存欢迎语", function () {
+      return call("settingPut", { params: { key: "gateway.welcome_text" }, body: { value: welcome.value } })
+        .then(function (r) { out.appendChild(resultBox("已保存", r)); return load(); });
+    }, { out: function () { return out; }, tone: "pri" }),
+    btn("重新读取", function () { return load(); }, { out: function () { return out; }, tone: "gho" })));
+  s.body.appendChild(out);
+  s.body.appendChild(h("p", { class: "hint", text: "自动接受会立即同步 service_identity.auto_accept；关闭后新申请需要在「服务号与节点」里逐条接受。" }));
+  function load() {
+    return call("settings").then(function (r) {
+      var set = r.settings || {};
+      auto.set(!!set["gateway.auto_accept"]);
+      welcome.value = String(set["gateway.welcome_text"] || "");
+      return r;
+    });
+  }
+  load().catch(function (e) { renderError(out, e); });
+};
+var SETTING_LABELS = {
+  "gateway.auto_accept": "gateway.auto_accept",
+  "gateway.welcome_text": "gateway.welcome_text（≤2000 字符）"
+};
+
+VIEWS.diagnostics = function (host) {
+  var intS = section("数据库", "integrity_report：只读 PRAGMA 与计数，不查行");
+  var brS = section("节点桥", "bridge.state()：连接、待发命令与统计");
+  var cfgS = section("生效配置", "只显示可公开的部分；密钥与令牌永不返回");
+  var warS = section("告警", "config.warnings：安装期就能发现但不至于拒绝启动的问题");
+  var routeS = section("路由覆盖", "控制台 API 表与服务端注册表的对照（本地计算）");
+  [intS, brS, cfgS, warS, routeS].forEach(function (x) { host.appendChild(x.node); });
+
+  async function load() {
+    var r = await call("diagnostics");
+    var integ = r.integrity || {}, bridge = r.bridge || {}, cfg = r.config || {};
+    clear(intS.body);
+    intS.body.appendChild(h("div", { class: "reps" },
+      statCard("库大小", bytes(integ.db_bytes), integ.journal_mode || ""),
+      statCard("schema", String(integ.schema_version), "PRAGMA user_version"),
+      statCard("WAL 未落盘", fmtInt(integ.wal_uncheckpointed_frames), "帧"),
+      statCard("checkpoint 忙", integ.wal_checkpoint_busy ? "是" : "否", "")));
+    intS.body.appendChild(tableOf([
+      { label: "表", get: function (e) { return h("span", { class: "mono", text: e[0] }); } },
+      { label: "行数", get: function (e) { return h("span", { class: "num", text: fmtInt(e[1]) }); } }
+    ], Object.keys(integ.rows || {}).map(function (k) { return [k, integ.rows[k]]; })));
+    clear(brS.body);
+    brS.body.appendChild(kv([
+      ["connected", bridge.connected ? chip("在线", "g") : chip("离线", "b")],
+      ["ws_url", h("span", { class: "mono", text: bridge.ws_url || cfg.node_ws_url || "—" })],
+      ["user_id", h("span", { class: "mono", text: bridge.user_id || "—" })],
+      ["contact_address", h("span", { class: "mono", text: bridge.contact_address || "—" })],
+      ["pending_commands", String(bridge.pending_commands === undefined ? "—" : bridge.pending_commands)]
+    ].concat(rest(bridge, ["connected", "ws_url", "user_id", "contact_address", "pending_commands"]))));
+    clear(cfgS.body);
+    cfgS.body.appendChild(kv([
+      ["监听", (cfg.gateway_host || "") + ":" + (cfg.gateway_port || "")],
+      ["node_ws_url", h("span", { class: "mono", text: cfg.node_ws_url || "—" })],
+      ["public_base_url", h("span", { class: "mono", text: cfg.public_base_url || "—" })],
+      ["插件开关", Object.keys(cfg.plugins || {}).map(function (k) {
+          return chip(k + " " + (cfg.plugins[k] ? "开" : "关"), cfg.plugins[k] ? "g" : "w");
+        })],
+      ["outbox", JSON.stringify(r.outbox || {})]
+    ]));
+    clear(warS.body);
+    var warns = cfg.warnings || [];
+    if (!warns.length) warS.body.appendChild(h("p", { class: "hint", text: "✓ 没有配置告警" }));
+    warns.forEach(function (w) { warS.body.appendChild(h("div", { class: "warnline", text: "· " + w })); });
+    clear(routeS.body);
+    routeS.body.appendChild(h("p", { class: "hint", text: "共声明 " + Object.keys(API).length + " 个调用点；服务端注册表由 main.py 自检比对（页面无法跨进程读取，此处只做本地一致性显示）。" }));
+    return r;
+  }
+  load().catch(function (e) { renderError(intS.body, e); });
+};
+
+function countOf(name) {
+  var counts = (STATE.status || {}).counts;
+  if (!counts) return 0;
+  if (Array.isArray(counts)) {
+    for (var i = 0; i < counts.length; i++) if (String(counts[i][0]) === name) return n(counts[i][1]);
+    return 0;
+  }
+  return n(counts[name]);
+}
+
+/* ======================================================================== *
+ * 7. 启动
+ * ======================================================================== */
+
+window.addEventListener("hashchange", function () { if ($("shell").className === "on") route(); });
+document.addEventListener("keydown", function (ev) {
+  if ((ev.metaKey || ev.ctrlKey) && ev.key === "Enter" && $("shell").className !== "on") $("tokgo").click();
+});
+$("tokbase").textContent = "网关地址 " + location.origin;
+
+(function start() {
+  var saved = "";
+  try { saved = sessionStorage.getItem("popopx.admin.token") || ""; } catch (e) { saved = ""; }
+  if (saved) {
+    $("tokin").value = saved;
+    $("tokgo").disabled = true; $("tokgo").textContent = "恢复会话…";
+    boot(saved).then(function (ok) { if (ok) { $("tokin").value = ""; } },
+                    function () { $("tokerr").textContent = "无法恢复会话，请重新填写令牌。"; })
+      .then(function () { $("tokgo").disabled = false; $("tokgo").textContent = "进入控制台"; });
+  } else {
+    showGate("");
+  }
+})();
+
+})();
+</script>
+</body>
+</html>
