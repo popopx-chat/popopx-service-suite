@@ -366,9 +366,15 @@ CARD_STYLES = ("standard", "receipt", "security")
 # `false` for exactly those two) even
 # though both are legal on a card action — payment happens from a card, whose
 # amount and confirmation copy the user can see, not from a menu label.
-# The client has since grown `subItems` (reachable only under a `click` kind, capped by
-# `PopopxEcoLimits.maximumSubItems`); this suite emits none of those, so every menu it builds
-# is still flat — the `sub_menu` the brief asks for is a server-side gap, not a client limit.
+# The client renders a second level too: Swift `subItems`, decoded from the WIRE KEY `sub`
+# (`PopopxEcoModels.swift:408` — the Swift property name never appears on the wire), under a
+# `click` kind only and capped by `PopopxEcoLimits.maximumSubItems`. :func:`build_menu_item`
+# emits `sub`, and refuses a third level because the client drops the whole menu below two
+# (`BotMenuBarView.swift:137-138`). One client behaviour the server cannot enforce: a parent
+# that carries its own action is folded into its popup as the first row only while it has
+# FEWER than the cap of children (`BotMenuBarView.swift:145-152`), so a parent with exactly 5
+# sub-items has an action nobody can reach. That is a reason to keep the count under the cap,
+# not a reason to refuse the frame — the menu still renders.
 MENU_ACTION_KINDS = ("open_url", "send_cmd", "open_channel", "callback")
 
 _SEGMENT_RE = re.compile(r"^[A-Za-z0-9-_.]{1,128}$")
@@ -562,7 +568,19 @@ def build_menu_item(
     if subs:
         if len(subs) > EcoLimits.max_menu_subitems:
             raise EcoValidationError("menu_subitems", "%d exceeds %d" % (len(subs), EcoLimits.max_menu_subitems))
-        out["sub"] = [build_menu_item(**_as_menu_kwargs(s)) for s in subs]
+        built_subs = [build_menu_item(**_as_menu_kwargs(s)) for s in subs]
+        # Two levels is all the client draws: `BotMenuBarView` returns nil for the whole
+        # menu when any sub-item carries a sub-item of its own, so a third level is not a
+        # deeper menu — it is a menu that disappears. Refuse it here instead of sending a
+        # frame the client drops silently, one item short of the operator's intent.
+        for built in built_subs:
+            if built.get("sub"):
+                raise EcoValidationError(
+                    "menu_depth",
+                    "a sub-item may not carry its own sub-items; the client renders two "
+                    "levels and drops the whole menu below that (title %r)" % built.get("title"),
+                )
+        out["sub"] = built_subs
     else:
         # `subItems` is non-optional on the client with a default of []; sending
         # [] is the honest mirror of "no submenu".
@@ -1471,6 +1489,26 @@ def self_test() -> List[str]:
         7,
     )
     check("build_menu_is_idempotent", build_menu(once["items"], 7) == once)
+
+    # The ceiling above that idempotence does not test: the client draws TWO levels and
+    # `renderedMenu` returns nil for the whole menu if any sub-item carries sub-items of
+    # its own (`BotMenuBarView.swift:137-138`), so a third level is not a deeper menu, it
+    # is a menu that vanishes. The pair below is one claim and its control: the deep tree
+    # is refused by name, and the identical tree minus the grandchild still builds.
+    _sub = {"title": "订阅", "kind": "click", "action": {"action": "open_channel", "payload": "green"}}
+    _deep = {"title": "更多", "kind": "click", "sub_items": [dict(_sub, sub_items=[
+        {"title": "第三代", "kind": "click", "action": {"action": "callback", "payload": "kw:deep"}}])]}
+    try:
+        build_menu([_deep], 8)
+        check("rejects_a_third_menu_level", False)
+    except EcoValidationError as exc:
+        check("rejects_a_third_menu_level", exc.rule == "menu_depth")
+    check("the_same_tree_without_the_third_level_builds",
+          build_menu([{"title": "更多", "kind": "click", "sub_items": [_sub]}], 8)["items"][0]["sub"][0]["sub"] == [])
+    # The wire key is `sub`, never the Swift property name — a frame keyed `subItems`
+    # decodes as an item with no submenu and no error (`PopopxEcoModels.swift:408,427`).
+    check("sub_menu_travels_under_the_wire_key_sub",
+          "sub" in once["items"][2] and "subItems" not in json.dumps(once))
 
     # Card style/version required by the decoder, never defaulted away here.
     minimal = build_card("c-min", "hi")

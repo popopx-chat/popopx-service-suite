@@ -43,7 +43,7 @@ changed action would drop every other button, and there is no way to express
 so :meth:`EcoService.settle_card` re-delivers the full action list with
 `expiresAt` in the past. :func:`retired_actions` is that transformation, and it
 is why `kind="none"` never appears in this file: `build_action` refuses it
-(`crypto_service.py:506`) because the client has no such kind.
+(`crypto_service.py:512`) because the client has no such kind.
 
 The brief mandates the `menu_config` frame but says nothing about how a re-push
 is ordered, and the client does not sort: it *drops* anything not strictly newer
@@ -69,6 +69,7 @@ import ast
 import asyncio
 import base64
 import builtins
+import contextlib
 import hashlib
 import hmac
 import inspect
@@ -81,9 +82,10 @@ import sqlite3
 import sys
 import textwrap
 import time
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 # The names a route signature mentions must be reachable from THIS module's globals,
 # not only from inside :func:`create_app`. With ``from __future__ import annotations``
@@ -448,7 +450,7 @@ def retired_actions(actions: Sequence[Mapping[str, Any]], *, label: str = "已�
 
     The client has no "remove this button" and no disabled button
     (`PopopxEcoModels.swift:685-702`: `case .none: return false` is not even a
-    wire value; `build_action` rejects the kind at `crypto_service.py:506`). A
+    wire value; `build_action` rejects the kind at `crypto_service.py:512`). A
     used button therefore becomes one inert-looking confirmation whose *payload*
     is a no-op token, and the card itself is expired by the caller so the client
     renders no buttons at all (`ServiceCardBubbleView.swift:378-382`). Both
@@ -3095,7 +3097,24 @@ def create_app(config: Optional[Config] = None, *, gateway: Optional[Gateway] = 
     gw = gateway if gateway is not None else Gateway(cfg)
     gw.mount_plugins()
 
-    app = FastAPI(title="POPOPX service gateway", version="1.0.0", docs_url=None, redoc_url=None)
+    # The launch and teardown halves of one context manager, not two hooks: uvicorn
+    # runs the code after `yield` for as long as the app serves, and the `finally`
+    # still closes the node link and the outbox worker when a request phase raises.
+    # The deprecated `app.on_event("startup"/"shutdown")` pair did this with a
+    # DeprecationWarning printed on every boot and no way to order teardown after a
+    # failure.
+    @contextlib.asynccontextmanager
+    async def _lifespan(_app: Any) -> AsyncIterator[None]:
+        await gw.start()
+        try:
+            yield
+        finally:
+            await gw.stop()
+
+    app = FastAPI(
+        title="POPOPX service gateway", version="1.0.0",
+        docs_url=None, redoc_url=None, lifespan=_lifespan,
+    )
     app.state.gateway = gw
 
     # ── plugin routers ──────────────────────────────────────────────────────
@@ -3994,14 +4013,6 @@ def create_app(config: Optional[Config] = None, *, gateway: Optional[Gateway] = 
             },
         }
 
-    @app.on_event("startup")
-    async def _startup() -> None:
-        await gw.start()
-
-    @app.on_event("shutdown")
-    async def _shutdown() -> None:
-        await gw.stop()
-
     # The last thing that happens to the route table is the check on it, so every
     # launch path — `uvicorn app.main:create_app`, `python -m app.main`, a test
     # client built straight on this function — refuses an unguarded endpoint. The
@@ -4812,6 +4823,24 @@ def self_test() -> List[str]:
           app_source.index("app.include_router(mounted.router")
           < app_source.index('@app.get("/api/v1/plugins/{plugin_id}/status")'))
 
+    # The same source text answers a second question: the app must be built with one
+    # lifespan context manager rather than the two deprecated startup/shutdown hooks it
+    # replaced. Those printed a DeprecationWarning on every boot, and an operator who
+    # sees a warning on every launch stops reading warnings.
+    check("the_app_is_built_with_a_lifespan_handler", "lifespan=_lifespan" in app_source)
+    check("the_lifespan_closes_the_gateway_in_a_finally",
+          app_source.index("await gw.start()")
+          < app_source.index("finally:")
+          < app_source.index("await gw.stop()"))
+    # Decorators, not text: a comment that merely mentions the old hook must not be able
+    # to fail this, and a real one coming back must.
+    _app_tree = ast.parse(app_source)
+    check("no_deprecated_startup_shutdown_hooks_are_registered", not any(
+        isinstance(dec, ast.Call) and getattr(dec.func, "attr", "") == "on_event"
+        for node in ast.walk(_app_tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        for dec in node.decorator_list))
+
     # The other half of that ordering: because a plugin router is mounted *first*, any
     # plugin whose own routes include a single-segment wildcard (`/{alert_id}`,
     # `/{poll_id}`) answers `GET <prefix>/status` with its wildcard's error — 404
@@ -4844,6 +4873,25 @@ def self_test() -> List[str]:
     check("the_console_leads_with_its_licence", console_source.startswith(
         "<!--\n  Copyright (c) 2026 POPOPX (popopx.chat)\n"
         "  SPDX-License-Identifier: AGPL-3.0-only\n-->"))
+
+    # The console restates the client's menu ceilings in JavaScript because an operator
+    # needs to be stopped before the save, not after. Two restatements drift unless
+    # somebody compares them, and a ceiling that only exists in one of the two files is a
+    # menu the operator can build and the phone refuses to draw — so each menu ceiling is
+    # read out of `LIMITS` and matched against `EcoLimits`, one check per name.
+    for _limit_name in ("max_menu_items", "max_menu_subitems", "max_menu_title_chars"):
+        _js = re.search(r"\b%s:\s*(\d+)" % _limit_name, console_source)
+        check("console_menu_limit_%s_matches_the_gateway" % _limit_name,
+              _js is not None and int(_js.group(1)) == getattr(EcoLimits, _limit_name))
+    # Control for the three checks above: the same extraction against a name the console
+    # does not publish has to come back empty, otherwise a failed regex would pass silently.
+    _js_absent = re.search(r"\bmax_menu_nonesuch:\s*(\d+)", console_source)
+    check("the_console_limit_extractor_can_come_up_empty", _js_absent is None)
+    # The console has no "+子项" button below the first level, but a wire value pasted or
+    # edited into `sub` can still be three deep, and the server refuses that; the panel has
+    # to say so, or the operator sees a save error with no pre-save warning.
+    check("the_console_names_the_two_level_ceiling",
+          "menuProblems" in console_source and "子菜单只到第二级" in console_source)
     served_routes = sorted(
         {"%s %s" % (str(row["verb"]).upper(), row["path"]) for row in routes}
         | {line for paths in mounted_routes.values() for line in paths}
@@ -5108,6 +5156,16 @@ def self_test() -> List[str]:
         check("store_menu_keeps_a_view_url", str(menu["menu"]["items"][1].get("url") or "").endswith("/h5/intro"))
         check("store_menu_keeps_sub_items", len(menu["menu"]["items"][2].get("sub") or []) == 1)
         check("store_menu_writes_an_empty_sub_list_on_a_leaf", menu["menu"]["items"][0].get("sub") == [])
+        # The store path is the one a plugin or the console actually posts through, so the
+        # two-level ceiling has to bite here as well and not only inside the codec: the
+        # client renders no third level at all (`BotMenuBarView.swift:137-138`).
+        try:
+            eco.store_menu([{"title": "更多", "kind": "click", "sub_items": [
+                {"title": "订阅", "kind": "click", "sub_items": [
+                    {"title": "第三代", "kind": "click", "action": {"action": "callback", "payload": "kw:x"}}]}]}])
+            check("store_menu_refuses_a_third_level", False)
+        except EcoError as exc:
+            check("store_menu_refuses_a_third_level", exc.rule == "menu_depth")
         raises("store_menu_refuses_a_payment_action", EcoError,
                lambda: eco.store_menu([{"title": "x", "action": {"action": "pay_credits"}}]))
         check("menu_reply_finds_the_keyword", eco.menu_reply_for("order") is not None)
@@ -5591,7 +5649,29 @@ def http_self_test() -> List[str]:
         gateway.eco.bridge.command = _fake_command
         check("the_faked_link_reports_itself_connected", gateway.eco.bridge_connected() is True)
 
-        app = create_app(config=config, gateway=gateway)
+        # Building the app used to print a DeprecationWarning on every boot, because the
+        # startup/shutdown pair hung on the deprecated `app.on_event`. The launch path has
+        # to stay quiet, so the build is wrapped in a warning recorder — and the recorder
+        # is proved to have teeth against a probe app that still uses that hook, otherwise
+        # the check below passes whenever the recorder is simply broken.
+        with warnings.catch_warnings(record=True) as _boot_warnings:
+            warnings.simplefilter("always")
+            app = create_app(config=config, gateway=gateway)
+        _deprecated = sorted(
+            {str(w.message).strip().splitlines()[0] for w in _boot_warnings
+             if issubclass(w.category, DeprecationWarning)}
+        )
+        check("building_the_app_emits_no_deprecation_warning", not _deprecated)
+        _noisy = FastAPI()
+        with warnings.catch_warnings(record=True) as _probe_warnings:
+            warnings.simplefilter("always")
+
+            @_noisy.on_event("startup")
+            def _noisy_startup() -> None:
+                pass
+
+        check("the_warning_recorder_would_have_caught_the_old_hooks",
+              any(issubclass(w.category, DeprecationWarning) for w in _probe_warnings))
         # `raise_server_exceptions=False` is the point of the sweep: a handler that
         # crashes has to come back as the 500 the operator would see, so it can be
         # listed by route instead of aborting the run at the first one.

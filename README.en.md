@@ -223,14 +223,14 @@ last step.
 
 The authoritative count is the last line that command prints. On this machine on 2026-11-21
 only the standard library was available (no `cryptography`, no `fastapi`), and the measured
-result was **2274 checks across 12 groups**: `app.crypto_service.crypto_self_test` (needs
+result was **2286 checks across 12 groups**: `app.crypto_service.crypto_self_test` (needs
 `cryptography`) and `app.main.http_self_test` (needs `fastapi`) were named as `SKIPPED` by the
 runner, which prints "those paths are NOT verified here" — those two groups ran zero checks
 here, which is not the same as having run and not been counted. Re-running on the same machine
-inside a venv that has `gateway/requirements.txt` installed measured **2306 checks across 14
+inside a venv that has `gateway/requirements.txt` installed measured **2320 checks across 14
 groups**, and the difference is exactly those two groups: the runner prints
-`crypto_self_test 6 checks` and `http_self_test 26 checks` per group, and the 14 group figures
-sum to the total line (2274 + 6 + 26 = 2306), so you can audit your own run the same way. One
+`crypto_self_test 6 checks` and `http_self_test 28 checks` per group, and the 14 group figures
+sum to the total line (2286 + 6 + 28 = 2320), so you can audit your own run the same way. One
 caveat: this machine has no 3.11, so both measurements ran on 3.9.6, not on the
 `requirements.txt` target interpreter.
 
@@ -243,7 +243,7 @@ tell a mounted route from a route that merely exists in source.
 # Still from the repository root (cd .. if the block above left you in gateway/)
 python3.11 -m venv .venv                      # 3.11 is the suite's target interpreter
 .venv/bin/pip install -r gateway/requirements.txt
-cd gateway && ../.venv/bin/python -m app.main --self-test   # 14 groups green, no SKIPPED (2306 here)
+cd gateway && ../.venv/bin/python -m app.main --self-test   # 14 groups green, no SKIPPED (2320 here)
 ```
 
 ## Cross-implementation crypto check

@@ -932,7 +932,7 @@ def option_actions(poll_id: str, options: Sequence[str]) -> List[Dict[str, Any]]
 # answers `.rejected` for a card that is not sane (PopopxEcoRouterAndDeepLink.swift:149)
 # — so a "disabled button" would delete the whole card from the phone, final tally
 # included. `crypto_service.build_action` refuses it for the same reason
-# (app/crypto_service.py:506-507). Nor can the buttons be *removed*: an update with an
+# (app/crypto_service.py:512-513). Nor can the buttons be *removed*: an update with an
 # empty `actions` list means "unchanged" to the client (`PopopxEcoRouterAndDeepLink.swift:186`).
 # The one mechanism the client does have is the card's deadline: past `et` the bubble
 # drops every button (`ServiceCardBubbleView.swift:379`, `cardIsInert ? [] : …`), draws

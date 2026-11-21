@@ -1262,7 +1262,7 @@ def card_progress(record: AlertRecord, *, actor_label: str = "") -> Dict[str, An
     `0...maximumProgressPercent` = 100, and a detail within
     `maximumValueCharacters` (240) (`PopopxEcoModels.swift:589-594`, limits at
     :55-64). `crypto_service.build_card` re-checks all three with the same numbers
-    (`crypto_service.py:618-630`), so an out-of-range percent is an exception here
+    (`crypto_service.py:636-648`), so an out-of-range percent is an exception here
     rather than a dropped frame.
     """
     if record.status == STATUS_FIRING:
@@ -1353,7 +1353,7 @@ def build_alert_card(record: AlertRecord, *, card_id: str, detail_url: Optional[
     so the client's newest-wins comparison
     (`PopopxEcoRouterAndDeepLink.swift:151`) can order this frame against the one
     before it. `m` is not written here: the frame carries the mode, and the nested
-    field is ignored on decode (`crypto_service.py:588-594`).
+    field is ignored on decode (`crypto_service.py:606-612`).
     """
     body = card_body(record)
     fields = card_fields(record)
@@ -1534,7 +1534,7 @@ async def _sync_card(deps: PluginDeps, record: AlertRecord, targets: Sequence[in
     `deliver_card` for a follower who has no card yet (including one added after the
     first webhook), `update_card` for everyone who has. Neither path is given a
     visible text: a card update may not carry prose at all
-    (`crypto_service.py:687-692`), and an internal alert does not need a chat message
+    (`crypto_service.py:705-710`), and an internal alert does not need a chat message
     on top of its own bubble.
     """
     delivered: List[int] = []

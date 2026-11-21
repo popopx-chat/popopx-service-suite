@@ -162,12 +162,12 @@ token 盖住的_admin 路由就不该开始监听），完整套件是开发/发
 `start_macos.sh` 与 `install_ubuntu22.sh` 的最后一步打印出来供复制。
 
 权威计数是这条命令自己打出来的最后一行。本机 2026-11-21 只有标准库（`cryptography` 和 `fastapi`
-都没装），实测是 **2274 条 / 12 组**：`app.crypto_service.crypto_self_test`（缺 `cryptography`）和
+都没装），实测是 **2286 条 / 12 组**：`app.crypto_service.crypto_self_test`（缺 `cryptography`）和
 `app.main.http_self_test`（缺 `fastapi`）两组被运行器点名 `SKIPPED`，并打印 "those paths are NOT
 verified here"——这两组在本机一条都没跑过，不是"跑过了没记上"。同一台机器上换一个装了
-`gateway/requirements.txt` 的 venv 再跑，实测 **2306 条 / 14 组**，多出来的正是那两组：运行器逐组打印
-`crypto_self_test 6 checks` 与 `http_self_test 26 checks`，14 组之和恰好等于总行
-（2274 + 6 + 26 = 2306），所以你机器上那一行也能这样拆开对账。一个限定：本机可用的解释器只有 3.9.6，
+`gateway/requirements.txt` 的 venv 再跑，实测 **2320 条 / 14 组**，多出来的正是那两组：运行器逐组打印
+`crypto_self_test 6 checks` 与 `http_self_test 28 checks`，14 组之和恰好等于总行
+（2286 + 6 + 28 = 2320），所以你机器上那一行也能这样拆开对账。一个限定：本机可用的解释器只有 3.9.6，
 两次实测都跑在 3.9.6 上，不是 `requirements.txt` 指定的 3.11。
 
 断言分布在：协议层、数据库、配置、计费、密码学、节点桥、五个插件、跨实现密码学、以及 HTTP 组
@@ -177,7 +177,7 @@ verified here"——这两组在本机一条都没跑过，不是"跑过了没�
 # 同样从仓库根目录（跑过上一块就先 cd ..）
 python3.11 -m venv .venv                      # 3.11 是这套件的目标解释器，见 requirements.txt 头几行
 .venv/bin/pip install -r gateway/requirements.txt
-cd gateway && ../.venv/bin/python -m app.main --self-test   # 14 组全绿、无 SKIPPED（本机实测 2306 条）
+cd gateway && ../.venv/bin/python -m app.main --self-test   # 14 组全绿、无 SKIPPED（本机实测 2320 条）
 ```
 
 ## 跨实现密码学校验

@@ -1425,6 +1425,7 @@ function menuProblems(list, top) {
       if (String(it.url || "").length > LIMITS.url) bad.push(tag + "：url 超过 " + LIMITS.url + " 字符。");
     }
     if (it.sub && it.sub.length > LIMITS.max_menu_subitems) bad.push(tag + "：子项 " + it.sub.length + " 个，上限 " + LIMITS.max_menu_subitems + " 个。");
+    if (!top && it.sub && it.sub.length) bad.push(tag + "：子菜单只到第二级，客户端遇到第三级会整条菜单不渲染。");
     if (it.sub && it.sub.length) bad = bad.concat(menuProblems(it.sub, false));
   });
   return bad;
