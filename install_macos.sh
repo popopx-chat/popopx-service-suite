@@ -397,7 +397,7 @@ check_only() {
   fi
 
   if [[ -f "${CONF_DIR}/env" ]]; then
-    log "config  ${CONF_DIR}/env exists and will be kept (a pre-run copy goes to .env.bak.<utc>)"
+    log "config  ${CONF_DIR}/env exists and will be kept (a pre-run copy goes to ${CONF_DIR}/env.bak.<utc>)"
   else
     log "config  ${CONF_DIR}/env will be generated from .env.example with two fresh secrets"
   fi
