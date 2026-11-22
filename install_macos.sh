@@ -291,6 +291,27 @@ gid_taken()    { dscl . -list /Groups PrimaryGroupID 2>/dev/null | awk -v g="$1"
 
 job_loaded() { launchctl print "system/$1" >/dev/null 2>&1; }
 
+# `bootout` is asynchronous: launchd has already torn the job's registration down by the
+# time the command returns, but not necessarily its bookkeeping. A `bootstrap` issued
+# inside that window answers "Bootstrap failed: 5: Input/output error" — the label is
+# still taken — which on a reinstall looks like a broken plist while the file on disk is
+# fine. Waiting for `print` to stop finding the job is the only signal launchd gives.
+# Returns 0 once the job is gone, 1 when the ceiling (default 5s) elapsed with it still
+# listed, so the caller decides whether to carry on; sleeping a fixed guess would be
+# either slower than needed on a clean box or still racy on a loaded one.
+wait_for_bootout() { # $1 = label, $2 = ceiling in 0.1s ticks
+  # `${2:-50}`, never `"$2"`: this runs under `set -u` and bash 3.2 aborts on an unbound
+  # second positional, so the common one-argument call would have killed the install
+  # *after* the bootout, leaving the gateway down.
+  local label="$1" limit="${2:-50}" ticks=0
+  while job_loaded "${label}"; do
+    [[ ${ticks} -lt ${limit} ]] || return 1
+    sleep 0.1
+    ticks=$((ticks + 1))
+  done
+  return 0
+}
+
 # ─────────────────────────────── reporting ──────────────────────────────────
 
 print_plan() {
@@ -643,7 +664,7 @@ build_venv() {
 }
 
 config_gate() {
-  # Boot-time refusals are exit 3 (config.py raises ConfigError; main.py:6106-6112
+  # Boot-time refusals are exit 3 (config.py raises ConfigError; main.py:6124-6130
   # turns it into a one-line stderr and a non-zero exit). Under launchd that becomes a
   # restart loop with no console, because there is no StartLimitBurst to stop trying.
   # So the refusals are evaluated here, before the job is ever bootstrapped, and the
@@ -834,6 +855,7 @@ bootstrap_job() { # $1 = label
   if job_loaded "${label}"; then
     log "booting out the previously loaded ${label}"
     launchctl bootout "system/${label}" || warn "bootout of ${label} failed; bootstrap may reject the new file"
+    wait_for_bootout "${label}" || warn "${label} is still listed 5s after bootout; bootstrapping anyway, so a failure below is launchd still holding the label"
   fi
   launchctl bootstrap system "${PLIST_DIR}/${label}.plist"
   launchctl enable "system/${label}"

@@ -59,7 +59,7 @@ popopx-service-suite/
   the `ImportError`
   text appended (`gateway/app/main.py:3092`). What a standard-library-only machine *can* do is
   run 12 of the 14 self-test groups, because the runner names the two that import those wheels
-  as `SKIPPED` — that is what the **2289 checks across 12 groups** figure below is, and it is
+  as `SKIPPED` — that is what the **2290 checks across 12 groups** figure below is, and it is
   not a gateway answering requests.
 - A running `popopx-agent` / `popopx-chat` node exposing its WebSocket control API on
   `127.0.0.1:5225`.
@@ -159,7 +159,7 @@ Measured offline on this machine: `--help`, `--check` and `--dry-run` (including
 all exit 0, both plists pass `plutil -lint`, and the dry-run proves with `cksum` that a
 pre-existing env file survives byte-identical with one `.bak.<utc>` added. `brew`'s Python 3.11.18
 passes the interpreter gate, and a venv built from it with `gateway/requirements.txt` actually
-installed measures **2323 checks across 14 groups, exit 0** on `--self-test` (that run also caught
+installed measures **2324 checks across 14 groups, exit 0** on `--self-test` (that run also caught
 an HTTP instrument that goes blind only on the newer starlette — see **Self-test** below).
 
 The sudo install that really starts the service **was run on this Mac on 2026-11-22**:
@@ -175,8 +175,21 @@ in `AgentBridge.start()` and took the gateway down with it. After the fix the sa
 one warning, leaves `node_connected` false and retries in the background with capped backoff;
 `strict=True` still raises, and that was verified too.
 
+A reinstall can also hit launchd's own timing: `bootout` is asynchronous, so the label may still be
+held when the command returns, and the `bootstrap` issued right after answers
+`Bootstrap failed: 5: Input/output error` — which reads like a broken plist while the file on disk is
+fine. `bootstrap_job` now polls `launchctl print` between those two commands until the job stops
+being found, with a 5-second ceiling; when the ceiling expires it bootstraps anyway and says so, so
+the wait is neither silent nor unbounded. The self-test pins that ordering as
+`the_macos_installer_waits_for_bootout_before_bootstrapping`, and the instrument was shown to
+discriminate: deleting the wait line, moving it after the bootstrap, and removing the ceiling each
+make it fail.
+
 Not measured yet: whether KeepAlive really pulls a `kill -9`ed process back, and whether `_popopx`
-and `/usr/local/*` are genuinely gone after an uninstall. The node unit likewise stops at
+and `/usr/local/*` are genuinely gone after an uninstall. The bootout wait above carries the same
+caveat — its evidence is a synthetic `launchctl` (teardown modelled as three further polls, plus the
+ceiling path), and the window on real launchd cannot be summoned on demand, so "no more rc=5 on
+reinstall" is only proven the next time you actually reinstall. The node unit likewise stops at
 "generated and linted": what this repository has started on a Mac is the development node in
 `start_macos.sh`; a node running as `_popopx-node` against its own database prefix has never been
 started.
@@ -364,16 +377,16 @@ copying as the last step by `start_macos.sh`, `install_macos.sh` and `install_ub
 
 The authoritative count is the last line that command prints. On this machine on 2026-11-22
 `/usr/bin/python3` has only the standard library (no `cryptography`, no `fastapi`), and the
-measured result was **2289 checks across 12 groups**: `app.crypto_service.crypto_self_test` (needs
+measured result was **2290 checks across 12 groups**: `app.crypto_service.crypto_self_test` (needs
 `cryptography`) and `app.main.http_self_test` (needs `fastapi`) were named as `SKIPPED` by the
 runner, which prints "those paths are NOT verified here" — those two groups ran zero checks
 here, which is not the same as having run and not been counted. Re-running on the same machine
-inside a venv that has `gateway/requirements.txt` installed measured **2323 checks across 14
+inside a venv that has `gateway/requirements.txt` installed measured **2324 checks across 14
 groups**, and the difference is exactly those two groups: the runner prints
 `crypto_self_test 6 checks` and `http_self_test 28 checks` per group, and the 14 group figures
-sum to the total line (2289 + 6 + 28 = 2323), so you can audit your own run the same way. Every
+sum to the total line (2290 + 6 + 28 = 2324), so you can audit your own run the same way. Every
 figure above was re-measured on 2026-11-22: the repository `.venv`'s 3.9.6 (fastapi 0.128.8) and a
-fresh venv built from `brew`'s Python 3.11.18 both measure **2323 checks across 14 groups, exit 0**.
+fresh venv built from `brew`'s Python 3.11.18 both measure **2324 checks across 14 groups, exit 0**.
 The second one was not a formality: `requirements.txt` pins ranges, so the new venv resolved
 fastapi 0.165.0 with starlette 1.10.0, and starlette 1.x no longer flattens an
 `include_router()` into `app.routes` — it keeps one nested `_IncludedRouter` in their place.
@@ -405,7 +418,7 @@ tell a mounted route from a route that merely exists in source.
 # Still from the repository root (cd .. if the block above left you in gateway/)
 python3.11 -m venv .venv                      # 3.11 is the suite's target interpreter
 .venv/bin/pip install -r gateway/requirements.txt
-cd gateway && ../.venv/bin/python -m app.main --self-test   # 14 groups green, no SKIPPED (2323 here)
+cd gateway && ../.venv/bin/python -m app.main --self-test   # 14 groups green, no SKIPPED (2324 here)
 ```
 
 ## Cross-implementation crypto check

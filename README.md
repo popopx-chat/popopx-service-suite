@@ -52,7 +52,7 @@ popopx-service-suite/
   没有「降级 HTTP 路径」这回事：`create_app()` 直接抛 `RuntimeError: FastAPI is not installed;
   run ./start_macos.sh, ./install_macos.sh or ./install_ubuntu22.sh first`（后面拼 `ImportError` 原文，见
   `gateway/app/main.py:3092`）。这种机器能做的是跑 14 组自检里的 12 组——运行器会把依赖那两个
-  wheel 的组点名 `SKIPPED`。下面「自检」里的 **2289 条 / 12 组** 就是这么来的，它不是一台正在
+  wheel 的组点名 `SKIPPED`。下面「自检」里的 **2290 条 / 12 组** 就是这么来的，它不是一台正在
   应答的网关。
 - 需要一个正在运行的 `popopx-agent` / `popopx-chat` 节点，它的 WebSocket 控制口在
   `127.0.0.1:5225`。没有节点也能起服务，见下面「启动行为与插件开关」。
@@ -130,7 +130,7 @@ Crashed=true}`、`RestartSec=3`→`ThrottleInterval=3`（那是最短间隔的�
 本机离线实测到的：`--help`、`--check`、`--dry-run`（含 `--with-node`）全部退出 0，两个 plist
 `plutil -lint` 通过，dry-run 里"已存在的 env 逐字节不变、只多一个 `.bak.<utc>`"这条由 cksum 现场
 证明；`brew` 装的 Python 3.11.18 过了版本门，用它按 `gateway/requirements.txt` 实装依赖建一个 venv，
-`--self-test` 实测 **2323 条 / 14 组、exit 0**（这一跑顺手揪出一个只在新版 starlette 上失明的 HTTP
+`--self-test` 实测 **2324 条 / 14 组、exit 0**（这一跑顺手揪出一个只在新版 starlette 上失明的 HTTP
 量具，见「自检」）。
 
 带 sudo 的真装真起 **2026-11-22 在这台 Mac 上跑过了**：`/Library/LaunchDaemons/com.popopx.gateway.plist`
@@ -143,8 +143,16 @@ Crashed=true}`、`RestartSec=3`→`ThrottleInterval=3`（那是最短间隔的�
 同一场景下 `start()` 只记一条 warning、`node_connected` 保持 false、supervisor 后台退避重连；
 `strict=True` 的 fail-fast 仍然抛，这条也现场验过。
 
+重装时还会撞到 launchd 自己的时序：`bootout` 是异步的，命令返回那一刻标签未必已经释放，紧跟其后的
+`bootstrap` 于是回 `Bootstrap failed: 5: Input/output error`——读起来像 plist 坏了，盘上那个文件其实没问题。
+`bootstrap_job` 现在在两条命令之间轮询 `launchctl print`，直到任务查不到为止，上限 5 秒；到点还没消失就
+照样 bootstrap 并明说"这是 launchd 还占着标签"，既不静默死等、也不假装成功。自检里
+`the_macos_installer_waits_for_bootout_before_bootstrapping` 钉住这段顺序，量具用三种破坏做过对照（删掉等待行、
+把等待挪到 bootstrap 之后、去掉上限），三种都判失败。
+
 还没实测到的：`kill -9` 之后 KeepAlive 是否真把进程拉回来、卸载之后 `_popopx` 与 `/usr/local/*`
-是否真没有了。节点单元同样只到"生成并 lint"——本仓在 Mac 上起过的是 `start_macos.sh` 那个开发节点，
+是否真没有了。上面那条 bootout 等待也一样——证据是合成 `launchctl`（异步拆解按 3 次轮询建模，加上
+到上限那一路），真机 launchd 的这个窗口不能按需重现，所以"真装时不再报 5"要等你下一次重装才算验过。节点单元同样只到"生成并 lint"——本仓在 Mac 上起过的是 `start_macos.sh` 那个开发节点，
 以 `_popopx-node` 身份、自己的数据库前缀跑起来的节点还没起过。
 
 ## 快速开始 — Ubuntu 22.04（生产）
@@ -304,14 +312,14 @@ token 盖住的_admin 路由就不该开始监听），完整套件是开发/发
 `start_macos.sh`、`install_macos.sh` 与 `install_ubuntu22.sh` 在最后一步打印出来供复制。
 
 权威计数是这条命令自己打出来的最后一行。本机 2026-11-22 用 `/usr/bin/python3` 跑只有标准库那一档
-（`cryptography` 和 `fastapi` 都没装），实测是 **2289 条 / 12 组**：`app.crypto_service.crypto_self_test`（缺 `cryptography`）和
+（`cryptography` 和 `fastapi` 都没装），实测是 **2290 条 / 12 组**：`app.crypto_service.crypto_self_test`（缺 `cryptography`）和
 `app.main.http_self_test`（缺 `fastapi`）两组被运行器点名 `SKIPPED`，并打印 "those paths are NOT
 verified here"——这两组在本机一条都没跑过，不是"跑过了没记上"。同一台机器上换一个装了
-`gateway/requirements.txt` 的 venv 再跑，实测 **2323 条 / 14 组**，多出来的正是那两组：运行器逐组打印
+`gateway/requirements.txt` 的 venv 再跑，实测 **2324 条 / 14 组**，多出来的正是那两组：运行器逐组打印
 `crypto_self_test 6 checks` 与 `http_self_test 28 checks`，14 组之和恰好等于总行
-（2289 + 6 + 28 = 2323），所以你机器上那一行也能这样拆开对账。上面每一档都在 2026-11-22 重测过：
+（2290 + 6 + 28 = 2324），所以你机器上那一行也能这样拆开对账。上面每一档都在 2026-11-22 重测过：
 仓库 `.venv` 的 3.9.6（fastapi 0.128.8）与 `brew` 装的 3.11.18 各建一个 venv，两边同为
-**2323 条 / 14 组、exit 0**。后一次不是重复劳动：`requirements.txt`
+**2324 条 / 14 组、exit 0**。后一次不是重复劳动：`requirements.txt`
 钉的是区间，新 venv 因此拿到 fastapi 0.165.0 + starlette 1.10.0，而 starlette 1.x 的
 `include_router` 不再把插件路由摊平进 `app.routes`（改成挂一个嵌套的 `_IncludedRouter`），HTTP 组
 按 `isinstance(r, APIRoute)` 读一遍就少了 30 条插件路由、报出 39 个 verb+path「声明了却没装上」。
@@ -333,7 +341,7 @@ verified here"——这两组在本机一条都没跑过，不是"跑过了没�
 # 同样从仓库根目录（跑过上一块就先 cd ..）
 python3.11 -m venv .venv                      # 3.11 是这套件的目标解释器，见 requirements.txt 头几行
 .venv/bin/pip install -r gateway/requirements.txt
-cd gateway && ../.venv/bin/python -m app.main --self-test   # 14 组全绿、无 SKIPPED（本机实测 2323 条）
+cd gateway && ../.venv/bin/python -m app.main --self-test   # 14 组全绿、无 SKIPPED（本机实测 2324 条）
 ```
 
 ## 跨实现密码学校验

@@ -4784,6 +4784,24 @@ def self_test() -> List[str]:
     # has nothing to do with what it is measuring.
     check("every_shell_launcher_runs_the_module_entrypoint", launched_via_main == 3)
 
+    # `launchctl bootout` is asynchronous. A `bootstrap` issued while launchd still holds
+    # the label answers "Bootstrap failed: 5: Input/output error", which on a macOS
+    # reinstall reads as a broken plist while the file on disk is fine — this was hit for
+    # real, not in a test. The suite cannot call launchctl, so the gate is textual: inside
+    # `bootstrap_job` the wait must sit between the bootout and the bootstrap that depends
+    # on it, and the waiter must be bounded, because an unbounded one turns a rare failure
+    # into an installer that never returns.
+    macos_installer = suite_root / "install_macos.sh"
+    installer_text = macos_installer.read_text(encoding="utf-8") if macos_installer.is_file() else ""
+    job_body = re.search(r"^bootstrap_job\(\).*?^\}", installer_text, re.M | re.S)
+    waiter_body = re.search(r"^wait_for_bootout\(\).*?^\}", installer_text, re.M | re.S)
+    bootout_at = job_body.group(0).find("launchctl bootout") if job_body else -1
+    wait_at = job_body.group(0).find("wait_for_bootout ") if job_body else -1
+    bootstrap_at = job_body.group(0).find("launchctl bootstrap") if job_body else -1
+    check("the_macos_installer_waits_for_bootout_before_bootstrapping",
+          -1 < bootout_at < wait_at < bootstrap_at
+          and bool(waiter_body) and "return 1" in waiter_body.group(0))
+
     # The plugin mount is the one part of the route table that `route_census` cannot
     # see — it reads `@app.<verb>` decorators inside this function, and a plugin's
     # routes arrive through `include_router` — so both of the defects below passed
