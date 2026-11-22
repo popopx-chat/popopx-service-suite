@@ -3548,7 +3548,10 @@ def self_test() -> List[str]:
         # Throttles.
         window = _MintWindow(limit=3, window_seconds=60.0)
         wkey = window.source_key("203.0.113.7")
-        check("window_key_is_not_the_address", "203" not in wkey and len(wkey) == 32)
+        check("window_key_is_not_the_address",
+              wkey != "203.0.113.7" and len(wkey) == 32
+              and all(c in "0123456789abcdef" for c in wkey)
+              and window.source_key("203.0.113.7") == wkey)
         check("window_key_is_per_process_salted", wkey != _MintWindow().source_key("203.0.113.7"))
         check("window_allows_up_to_the_limit",
               all(window.allow(wkey, t) for t in (0.0, 10.0, 20.0)))
