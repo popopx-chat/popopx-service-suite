@@ -264,8 +264,9 @@ Field names below are the ones the handlers read.
 ```bash
 TOKEN=$(grep '^POPOPX_ADMIN_TOKEN=' .env | cut -d= -f2-)
 API=http://127.0.0.1:8080
+CHANNEL_ID=ch_1a2b3c4d                                # replace with a real id from `GET /api/v1/channels`
 
-curl -s $API/healthz | python3 -m json.tool     # public: node_connected, uptime, version
+curl -s $API/healthz | python3 -m json.tool     # public: ok, node_connected, service_id
 
 # 1. Redeem a POPX-CP voucher code into the account balance
 curl -s -X POST $API/api/v1/vouchers/redeem -H "X-Admin-Token: $TOKEN" \
@@ -283,7 +284,7 @@ curl -s -X POST $API/api/v1/send/text -H "X-Admin-Token: $TOKEN" \
      -H 'content-type: application/json' -d '{"contact_id":3,"text":"maintenance at 02:00 UTC"}'
 
 # 4. Rotate a paid channel's key material (epoch increments; Ed25519-signed envelope)
-curl -s -X POST $API/api/v1/channels/<channel_id>/rotate -H "X-Admin-Token: $TOKEN"
+curl -s -X POST "$API/api/v1/channels/$CHANNEL_ID/rotate" -H "X-Admin-Token: $TOKEN"
 
 # 5. Plugin state
 curl -s $API/api/v1/plugins -H "X-Admin-Token: $TOKEN"

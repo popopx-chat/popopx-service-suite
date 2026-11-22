@@ -208,8 +208,9 @@ NEXT STEPS：把 `POPOPX_PUBLIC_BASE_URL` 设成手机真正加载的那个 http
 ```bash
 TOKEN=$(grep '^POPOPX_ADMIN_TOKEN=' .env | cut -d= -f2-)
 API=http://127.0.0.1:8080
+CHANNEL_ID=ch_1a2b3c4d                                # 换成 `GET /api/v1/channels` 里的真实 id
 
-curl -s $API/healthz | python3 -m json.tool     # 公开：node_connected、uptime、version
+curl -s $API/healthz | python3 -m json.tool     # 公开：ok、node_connected、service_id
 
 # 1. 兑算力码：入账后 account 会随响应一起回来
 curl -s -X POST $API/api/v1/vouchers/redeem -H "X-Admin-Token: $TOKEN" \
@@ -227,7 +228,7 @@ curl -s -X POST $API/api/v1/send/text -H "X-Admin-Token: $TOKEN" \
      -H 'content-type: application/json' -d '{"contact_id":3,"text":"02:00 UTC 维护"}'
 
 # 4. 轮换付费频道密钥：epoch 自增，信封用频道 Ed25519 私钥签名
-curl -s -X POST $API/api/v1/channels/<channel_id>/rotate -H "X-Admin-Token: $TOKEN"
+curl -s -X POST "$API/api/v1/channels/$CHANNEL_ID/rotate" -H "X-Admin-Token: $TOKEN"
 
 # 5. 插件状态（控制台五个面板读的就是这一条）
 curl -s $API/api/v1/plugins -H "X-Admin-Token: $TOKEN"
@@ -370,8 +371,8 @@ cd gateway && python3 -m app.crypto_service emit /tmp/py.json && cd ..
 cd gateway && python3 ../official_tools/gen_voucher.py --help
 ```
 
-默认 `POPOPX_BILLING_REQUIRE_VOUCHER=0`：账户一建行就是 `ONLINE`，五个插件开箱可用，
-不需要向任何一方兑换激活码；计量照记、流水照平、控制台照看，所以配额数据是真的。
+默认 `POPOPX_BILLING_REQUIRE_VOUCHER=0`：账户一建行就是 `ONLINE`，四个默认开启的插件开箱可用
+（`web3_bridge` 默认关闭，要 `POPOPX_PLUGIN_WEB3_BRIDGE=1`，见上文），不需要向任何一方兑换激活码；计量照记、流水照平、控制台照看，所以配额数据是真的。
 把它设成 `1` 才回到准入模式：账户起始 `DRAFT`，未兑换的计量动作一律 409 `account_draft`，
 此时 `POPOPX_OFFICIAL_ED25519_PUBLIC_KEY` 变成启动必需项。私钥只在铸造机上，
 网关只用公钥离线验签，因此它无法造码。余额耗尽时插件会被熔断（`GateDecision`），
