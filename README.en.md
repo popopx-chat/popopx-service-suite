@@ -107,6 +107,26 @@ sudo ./install_macos.sh --with-node     # adds a second LaunchDaemon for the nod
 sudo ./install_macos.sh --uninstall     # service, account, code and config go; the state dir stays
 ```
 
+`--with-node` on macOS now: detects the architecture (arm64/x86_64), downloads the matching
+`popopx-chat-macos-{aarch64,x86-64}` binary from the official `popopx-chat/popopx-chat` GitHub Releases,
+verifies its SHA2-256 (digest from the release's `.digest` field or the body's `SHA2-256(<name>)= <hex>`
+line — both agree), installs it 0755 to `/usr/local/bin/popopx-chat`, and writes a `.provenance` file
+recording release tag, asset name, digest, size, and source URL. It then generates a secure wrapper
+`/usr/local/bin/popopx-node` (0750 root:wheel, `#!/bin/sh` + `set -eu` + `umask 077`, sources
+`${CONF_DIR}/node.conf`, conditionally passes `--server`/`--xftp-server`/`--user-display-name` — only
+when the corresponding env var is non-empty, otherwise inherits the binary's built-in `smp1..8.popopx.im`
+dual-stack cluster preset). `node.conf` leaves `NODE_SMP_SERVERS`/`NODE_XFTP_SERVERS` empty by default,
+with the canonical cluster addresses recorded in a comment as an optional override hook. Startup order
+is now node-before-gateway: `install_node_unit` → `wait_for_node_ready` (40s ceiling, timeout warns but
+does not die) → `install_plist gateway` → `bootstrap_job gateway`, so the gateway's first `/healthz` probe
+sees a live node.
+
+New flags: `--node-version TAG` (pin a release tag, default `latest`), `--no-node-download` (disable the
+download; requires a local binary or `--node-bin`). `--check` now reports the target architecture and
+asset name, and when no local binary exists performs a non-fatal egress probe (5s timeout, failure warns,
+offline still exits 0). `--dry-run` renders node.conf, the wrapper, and the node plist to a temp dir and
+lints them (`sh -n` + `plutil -lint`), without actually downloading.
+
 This path is the peer of Ubuntu's `--mode native`: a dedicated service account, code,
 configuration, state and logs all outside the working copy, start at boot, restart on crash,
 reinstallable and uninstallable. The layout follows macOS conventions of its own — code in
@@ -192,7 +212,10 @@ ceiling path), and the window on real launchd cannot be summoned on demand, so "
 reinstall" is only proven the next time you actually reinstall. The node unit likewise stops at
 "generated and linted": what this repository has started on a Mac is the development node in
 `start_macos.sh`; a node running as `_popopx-node` against its own database prefix has never been
-started.
+started. The real download path of `--with-node` (fetching the binary from GitHub Releases, SHA2-256
+verification, writing `.provenance`) and the node starting against the `smp1..8.popopx.im` cluster
+are also not verifiable on this sandbox (no SMP egress) — `--check`/`--dry-run` perform a non-fatal
+egress probe, and offline still exits 0.
 
 ## Quick start — Ubuntu 22.04 (production)
 
@@ -203,6 +226,22 @@ sudo ./install_ubuntu22.sh                # default --mode docker: gateway (+ no
 sudo ./install_ubuntu22.sh --mode native  # venv + systemd unit, no containers
 ./install_ubuntu22.sh --help              # --with-node / --port / --skip-apt
 ```
+
+`--with-node` in native mode now: detects the architecture (x86_64/aarch64), downloads the matching
+`popopx-chat-ubuntu-22_04-{x86_64,aarch64}` binary from the official `popopx-chat/popopx-chat` GitHub
+Releases, verifies its SHA2-256 (preferring `sha256sum`, falling back to `shasum -a 256` or `openssl`),
+installs it 0755 to `/usr/local/bin/popopx-chat`, and writes a `.provenance` file. It then generates a
+secure wrapper `/usr/local/bin/popopx-node` (0755 root:root, `#!/bin/sh` + `set -eu` + `umask 077`,
+sources `/etc/default/popopx-node`, conditionally passes `--server`/`--xftp-server`/`--user-display-name`).
+`/etc/default/popopx-node` leaves `NODE_SMP_SERVERS`/`NODE_XFTP_SERVERS` empty by default, with the
+canonical `smp1..8.popopx.im` dual-stack cluster addresses recorded in a comment as an optional override
+hook. The systemd unit's `ExecStart` is now `/usr/local/bin/popopx-node` (the wrapper), no longer inlining
+`$NODE_PORT`/`$NODE_DB_PREFIX`. Startup order is node-before-gateway: `systemctl restart popopx-node` →
+`wait_for_node_ready` (40s ceiling, timeout warns) → `systemctl restart popopx-gateway`.
+
+New flags: `--node-port N` (node WebSocket port, default 5225), `--node-bin PATH` (skip the download),
+`--node-version TAG` (pin a release tag), `--no-node-download` (disable the download). Docker mode's
+`--with-node` still uses the container image and does not trigger a download.
 
 Clone it wherever you like — `/opt/popopx-service-suite/src` is the installer's own copy, not
 your checkout: docker mode copies the compose file, `gateway/`, `official_tools/` and

@@ -94,6 +94,21 @@ sudo ./install_macos.sh --with-node     # 再加一个节点 LaunchDaemon（_pop
 sudo ./install_macos.sh --uninstall     # 服务、账号、代码、配置都删；状态目录默认保留
 ```
 
+`--with-node` 在 macOS 上现在会：探测架构（arm64/x86_64），从 `popopx-chat/popopx-chat` 官方 GitHub Releases
+动态下载对应的 `popopx-chat-macos-{aarch64,x86-64}` 二进制，SHA2-256 校验（digest 来自 release 的 `.digest` 字段
+或 body 里的 `SHA2-256(<name>)= <hex>` 行，两者一致），0755 装到 `/usr/local/bin/popopx-chat`，写 `.provenance`
+记录 release tag/asset/digest/size/source。然后生成安全包装脚本 `/usr/local/bin/popopx-node`（0750 root:wheel，
+`#!/bin/sh` + `set -eu` + `umask 077`，从 `${CONF_DIR}/node.conf` 读配置，条件式传 `--server`/`--xftp-server`/
+`--user-display-name`——仅当对应环境变量非空时才传，否则继承二进制内置的 `smp1..8.popopx.im` 双栈集群预设）。
+`node.conf` 里 `NODE_SMP_SERVERS`/`NODE_XFTP_SERVERS` 默认留空，注释里记录官方集群地址作为可选覆写钩子。
+启动顺序改成节点先于网关：`install_node_unit` → `wait_for_node_ready`（40 秒上限，超时只 warn 不 die）→
+`install_plist gateway` → `bootstrap_job gateway`，这样网关的第一次 `/healthz` 探测能看到活节点。
+
+新增的 flag：`--node-version TAG`（钉死 release tag，默认 `latest`）、`--no-node-download`（禁用下载，要求本地
+有二进制或传 `--node-bin`）。`--check` 现在会报告目标架构和 asset 名，无本地二进制时做一次非致命的 egress
+探测（5 秒超时，失败只 warn，离线仍 exit 0）。`--dry-run` 会把 node.conf、包装脚本、节点 plist 都渲染到临时
+目录并 lint（`sh -n` + `plutil -lint`），不实际下载。
+
 这条路径与 Ubuntu 的 `--mode native` 对等：专用服务账号、代码/配置/状态/日志全部离开工作副本、
 开机自起、崩溃自拉、可重装可卸载。布局用 macOS 自己的惯例——代码在
 `/usr/local/popopx-service-suite/{src,venv,requirements.lock}`，配置在
@@ -153,7 +168,10 @@ Crashed=true}`、`RestartSec=3`→`ThrottleInterval=3`（那是最短间隔的�
 还没实测到的：`kill -9` 之后 KeepAlive 是否真把进程拉回来、卸载之后 `_popopx` 与 `/usr/local/*`
 是否真没有了。上面那条 bootout 等待也一样——证据是合成 `launchctl`（异步拆解按 3 次轮询建模，加上
 到上限那一路），真机 launchd 的这个窗口不能按需重现，所以"真装时不再报 5"要等你下一次重装才算验过。节点单元同样只到"生成并 lint"——本仓在 Mac 上起过的是 `start_macos.sh` 那个开发节点，
-以 `_popopx-node` 身份、自己的数据库前缀跑起来的节点还没起过。
+以 `_popopx-node` 身份、自己的数据库前缀跑起来的节点还没起过。`--with-node` 的真实下载路径（从 GitHub
+Releases 拉二进制、SHA2-256 校验、写 `.provenance`）和本机沙箱没有 SMP 出站访问，所以"下载的二进制真能
+起、起完真连上 `smp1..8.popopx.im` 集群"这条也还没验过——`--check`/`--dry-run` 的 egress 探测是非致命的，
+离线仍 exit 0。
 
 ## 快速开始 — Ubuntu 22.04（生产）
 
@@ -164,6 +182,19 @@ sudo ./install_ubuntu22.sh                # 默认 --mode docker：网关（+节
 sudo ./install_ubuntu22.sh --mode native  # venv + systemd 单元，不用容器
 ./install_ubuntu22.sh --help              # --with-node / --port / --skip-apt
 ```
+
+`--with-node` 在 native 模式下现在会：探测架构（x86_64/aarch64），从 `popopx-chat/popopx-chat` 官方 GitHub
+Releases 动态下载对应的 `popopx-chat-ubuntu-22_04-{x86_64,aarch64}` 二进制，SHA2-256 校验（优先用 `sha256sum`，
+fallback 到 `shasum -a 256` 或 `openssl`），0755 装到 `/usr/local/bin/popopx-chat`，写 `.provenance`。然后生成安全
+包装脚本 `/usr/local/bin/popopx-node`（0755 root:root，`#!/bin/sh` + `set -eu` + `umask 077`，从
+`/etc/default/popopx-node` 读配置，条件式传 `--server`/`--xftp-server`/`--user-display-name`）。
+`/etc/default/popopx-node` 里 `NODE_SMP_SERVERS`/`NODE_XFTP_SERVERS` 默认留空，注释里记录官方 `smp1..8.popopx.im`
+双栈集群地址作为可选覆写钩子。systemd unit 的 `ExecStart` 改成 `/usr/local/bin/popopx-node`（包装脚本），不再内联
+`$NODE_PORT`/`$NODE_DB_PREFIX`。启动顺序改成节点先于网关：`systemctl restart popopx-node` → `wait_for_node_ready`
+（40 秒上限，超时只 warn）→ `systemctl restart popopx-gateway`。
+
+新增的 flag：`--node-port N`（节点 WebSocket 端口，默认 5225）、`--node-bin PATH`（跳过下载）、`--node-version TAG`
+（钉死 release tag）、`--no-node-download`（禁用下载）。docker 模式的 `--with-node` 仍然用容器镜像，不触发下载。
 
 仓库克隆在哪儿都行——`/opt/popopx-service-suite/src` 是安装脚本自己复制出来的，不是你的工作副本：
 docker 模式只复制 compose 文件、`gateway/`、`official_tools/` 和 `LICENSE`，native 模式复制整个

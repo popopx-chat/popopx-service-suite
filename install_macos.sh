@@ -5,7 +5,7 @@
 #
 #   sudo ./install_macos.sh                # gateway as a LaunchDaemon, on 127.0.0.1
 #   sudo ./install_macos.sh --lan          # same service bound to 0.0.0.0 — read the note
-#   sudo ./install_macos.sh --with-node    # + a second LaunchDaemon for the chat node
+#   sudo ./install_macos.sh --with-node    # + a node LaunchDaemon; downloads + SHA256-verifies the popopx-chat CLI if none is found
 #   ./install_macos.sh --check             # preflight only: report, write nothing, no root
 #   ./install_macos.sh --dry-run           # render plist + env into a temp dir, lint, no root
 #   sudo ./install_macos.sh --uninstall    # services, account and code go; state stays
@@ -67,6 +67,16 @@ BIND_HOST="${POPOPX_BIND_HOST:-127.0.0.1}"
 LAN_EXPLICIT=0
 NODE_PORT="${POPOPX_NODE_PORT:-5225}"
 NODE_BIN="${POPOPX_NODE_BIN:-}"
+# --with-node provisioning: when no local binary is found the installer downloads the
+# matching popopx-chat CLI from the upstream Releases and verifies its SHA2-256 before it
+# is ever run. NODE_VERSION is 'latest' or a tag like v7.1.2-popopx.1. NODE_DOWNLOAD=0
+# (--no-node-download) keeps the path fully offline. NODE_BIN_INSTALL is where the binary
+# lands, and it is baked into the node wrapper so launchd runs one stable path.
+NODE_REPO="popopx-chat/popopx-chat"
+NODE_VERSION="${POPOPX_NODE_VERSION:-latest}"
+NODE_DOWNLOAD=1
+NODE_BIN_INSTALL=""
+NODE_SOURCE=""
 NODE_DB_PREFIX=""
 PUBLIC_BASE_URL="${POPOPX_PUBLIC_BASE_URL:-}"
 PY_OVERRIDE="${POPOPX_PYTHON:-}"
@@ -111,10 +121,19 @@ Options:
                           Firewall off, 0.0.0.0 means every host on the LAN can reach
                           the admin API the moment the service starts.
   --public-base-url URL   Rewrite POPOPX_PUBLIC_BASE_URL to this origin (http(s)://…).
-  --with-node             Also install a LaunchDaemon for the open-source chat node.
+  --with-node             Also install a LaunchDaemon for the open-source chat node. When
+                          no node binary is found locally, download the matching
+                          popopx-chat CLI from the popopx-chat/popopx-chat Releases and
+                          verify its SHA2-256 before it is run. Requires outbound HTTPS at
+                          install time; --check and --dry-run stay offline.
   --node-bin PATH         Node binary (default: $POPOPX_NODE_BIN, then PATH, then the
-                          Homebrew and /usr/local prefixes).
+                          Homebrew and /usr/local prefixes, then the sibling cabal build
+                          tree). When set, this is used as-is and nothing is downloaded.
   --node-port N           Node's WebSocket API port (default 5225, or $POPOPX_NODE_PORT).
+  --node-version TAG      Release to download (default: latest, or $POPOPX_NODE_VERSION).
+                          A tag like v7.1.2-popopx.1 pins the node binary.
+  --no-node-download      Never download: use a local/--node-bin binary only, and fail if
+                          there is none. For an airgapped or review-first install.
   --python PATH           Interpreter to build the venv with (must be 3.11).
   --check                 Preflight only: run every read-only probe and write nothing.
   --dry-run               Generate the plist and the env file into a temporary directory,
@@ -143,6 +162,9 @@ while [[ $# -gt 0 ]]; do
     --node-bin=*)      NODE_BIN="${1#*=}"; shift ;;
     --node-port)       [[ -n "${2:-}" ]] || die "--node-port needs a number"; NODE_PORT="$2"; shift 2 ;;
     --node-port=*)     NODE_PORT="${1#*=}"; shift ;;
+    --node-version)    [[ -n "${2:-}" ]] || die "--node-version needs a release tag"; NODE_VERSION="$2"; shift 2 ;;
+    --node-version=*)  NODE_VERSION="${1#*=}"; shift ;;
+    --no-node-download) NODE_DOWNLOAD=0; shift ;;
     --python)          [[ -n "${2:-}" ]] || die "--python needs a path"; PY_OVERRIDE="$2"; shift 2 ;;
     --python=*)        PY_OVERRIDE="${1#*=}"; shift ;;
     --check)           CHECK_ONLY=1; shift ;;
@@ -284,6 +306,125 @@ find_node_bin() {
   return 1
 }
 
+# ─────────────────────── node binary provisioning (download) ─────────────────
+#
+# These run ONLY on the real --with-node install path. --check and --dry-read must never
+# require them, and --check must never die because the network is absent, so the actual
+# download is called from install_node() alone. The values that cross the wire — asset
+# name and SHA-256 — are derived from the live release (the generator), not hardcoded:
+# a guessed asset name downloads nothing and a hardcoded digest is stale the moment a
+# release is cut. macOS CLI assets are popopx-chat-macos-aarch64 / popopx-chat-macos-x86-64
+# (note: x86-64 with a hyphen on the Intel one — measured against the published assets).
+
+node_asset_name() { # stdout: the release asset for this machine
+  local m; m="$(uname -m)"
+  case "${m}" in
+    arm64|aarch64) printf 'popopx-chat-macos-aarch64' ;;
+    x86_64)        printf 'popopx-chat-macos-x86-64' ;;
+    *) die "unsupported macOS architecture '${m}'; pass --node-bin PATH, or use --no-node-download and install the node yourself" ;;
+  esac
+}
+
+sha256_of() { # $1 = file; stdout: lowercase hex digest
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'; return 0; fi
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; return 0; fi
+  if command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 "$1" | awk '{print $NF}'; return 0; fi
+  die "no SHA-256 tool found (shasum, sha256sum, or openssl); refusing to run an unverified binary"
+}
+
+node_release_meta() { # stdout: "tag<TAB>url<TAB>digest<TAB>size"; return 1 if unresolvable/offline
+  # A read of the GitHub Releases API, not of any secret. The API is unauthenticated here,
+  # so it can be rate-limited, but a failure is reported by the caller as "could not
+  # resolve, pass --node-bin" rather than a silent fallback to an unverified download.
+  local api asset py json
+  asset="$(node_asset_name)"
+  if [ "${NODE_VERSION}" = "latest" ]; then
+    api="https://api.github.com/repos/${NODE_REPO}/releases/latest"
+  else
+    api="https://api.github.com/repos/${NODE_REPO}/releases/tags/${NODE_VERSION}"
+  fi
+  py="$(bootstrap_python || true)"; [ -n "${py}" ] || return 1
+  # --noproxy is deliberately NOT used here: this is a real internet fetch, and a host
+  # behind a corporate proxy reaches api.github.com only through that proxy.
+  json="$(curl -fsSL --connect-timeout 10 --max-time 30 \
+            -H 'Accept: application/vnd.github+json' "${api}" 2>/dev/null)" || return 1
+  printf '%s' "${json}" | PY_ASSET="${asset}" "${py}" - <<'PYEOF'
+import json, os, re, sys
+want = os.environ["PY_ASSET"]
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+tag = d.get("tag_name", "") or ""
+digest_from_body = ""
+body = d.get("body") or ""
+m = re.search(r"(?m)^SHA2-256\(%s\)=\s*([0-9a-fA-F]{64})\s*$" % re.escape(want), body)
+if m:
+    digest_from_body = m.group(1).lower()
+for a in d.get("assets", []):
+    if a.get("name") == want:
+        dg = (a.get("digest") or "")
+        if dg.startswith("sha256:"):
+            dg = dg[len("sha256:"):].lower()
+        dg = dg or digest_from_body
+        print("%s\t%s\t%s\t%s" % (tag, a.get("browser_download_url", ""), dg, a.get("size", "")))
+        sys.exit(0)
+sys.exit(1)
+PYEOF
+}
+
+download_node_bin() { # stdout: installed binary path; only on the real --with-node install
+  local meta tag url want got size asset tmp dest
+  asset="$(node_asset_name)"
+  if ! meta="$(node_release_meta)"; then
+    die_code 4 "could not resolve '${asset}' in the ${NODE_REPO} release '${NODE_VERSION}'. Check the tag and outbound HTTPS to api.github.com, or pass --node-bin PATH / --no-node-download."
+  fi
+  tag="$(printf '%s' "${meta}" | cut -f1)"
+  url="$(printf '%s' "${meta}" | cut -f2)"
+  want="$(printf '%s' "${meta}" | cut -f3)"
+  size="$(printf '%s' "${meta}" | cut -f4)"
+  [ -n "${url}" ] || die_code 4 "release '${tag}' published no '${asset}' download URL; use --node-bin PATH or --no-node-download"
+  # An unverifiable download is not installed. GitHub exposes a per-asset digest, but if a
+  # future API shape ever returns none, stopping is the honest answer — not trusting bytes.
+  [ -n "${want}" ] || die_code 4 "no SHA-256 digest published for '${asset}' in release ${tag}; refusing to install an unverifiable binary"
+  dest="${INSTALL_ROOT}/bin/popopx-chat"
+  tmp="$(mktemp "${TMPDIR:-/tmp}/popopx-node.XXXXXX")"
+  log "downloading ${asset} from ${NODE_REPO} ${tag}${size:+ (${size} bytes)}"
+  if ! curl -fL --retry 3 --connect-timeout 15 --max-time 1800 -o "${tmp}" "${url}"; then
+    rm -f "${tmp}"
+    die_code 4 "download failed: ${url} (network or the release moved; nothing was installed)"
+  fi
+  got="$(sha256_of "${tmp}")"
+  if [ "${got}" != "${want}" ]; then
+    rm -f "${tmp}"
+    die_code 4 "SHA-256 mismatch for ${asset}: expected ${want}, got ${got}; the download was deleted and nothing was installed"
+  fi
+  install -d -m 0755 -o root -g wheel "${INSTALL_ROOT}/bin"
+  install -m 0755 -o root -g wheel "${tmp}" "${dest}"
+  rm -f "${tmp}"
+  # Provenance holds only public values (tag, asset, digest, size, source) — never a token —
+  # so an operator can audit exactly which bytes are running without re-fetching the release.
+  printf 'release=%s\nasset=%s\nsha256=%s\nsize=%s\nsource=https://github.com/%s\n' \
+    "${tag}" "${asset}" "${want}" "${size}" "${NODE_REPO}" > "${dest}.provenance"
+  chmod 0644 "${dest}.provenance"
+  log "verified ${asset} against its published SHA-256; installed ${dest}"
+  printf '%s' "${dest}"
+}
+
+wait_for_node_ready() { # $1 = ceiling in seconds (default 40); 0 = port is listening
+  # Bounded, never fatal: a production node dials the popopx.im cluster over the internet,
+  # and on a host that cannot reach it the port never opens. The gateway is documented to
+  # start degraded without a node, so a timeout here is a warning the caller prints, not an
+  # abort — an unbounded wait would hang a reinstall the same way an unbounded bootout would.
+  local limit="${1:-40}" waited=0
+  while [ "${waited}" -lt "${limit}" ]; do
+    port_listening "${NODE_PORT}" && return 0
+    sleep 1
+    waited=$((waited + 1))
+  done
+  return 1
+}
+
 user_exists() { id -u "$1" >/dev/null 2>&1; }
 group_exists() { dscl . -read "/Groups/$1" PrimaryGroupID >/dev/null 2>&1; }
 uid_taken()    { dscl . -list /Users UniqueID 2>/dev/null | awk -v u="$1" '$2==u{f=1} END{exit !f}'; }
@@ -403,14 +544,27 @@ check_only() {
   fi
 
   if [[ ${WITH_NODE} -eq 1 ]]; then
-    local nb
+    local nb arch asset
+    arch="$(uname -m)"
+    asset="$(node_asset_name || echo '<unsupported arch>')"
+    log "node    arch=${arch}, target asset=${asset}"
     nb="$(find_node_bin || true)"
     if [[ -n "${nb}" ]]; then
-      log "node    ${nb}"
+      log "node    local binary: ${nb}"
       port_listening "${NODE_PORT}" && warn "node    port ${NODE_PORT} is already listening — a second node will not bind it"
+    elif [[ ${NODE_DOWNLOAD} -eq 1 ]]; then
+      log "node    no local binary; will download ${asset} from GitHub Releases (popopx-chat/popopx-chat)"
+      # Non-fatal egress probe: short timeout, no retry. Offline must still exit 0, so a probe
+      # failure is informational only. The real download happens in the install path.
+      if curl -fsS --noproxy '*' --max-time 5 --head "https://github.com" >/dev/null 2>&1; then
+        log "node    egress to github.com: OK (the download will proceed when you run the installer)"
+      else
+        warn "node    egress to github.com: failed (offline or blocked); the installer will die_code 4 unless you pass --node-bin or --no-node-download"
+      fi
     else
-      warn "node    no popopx-chat binary found (--node-bin PATH, PATH, /usr/local/bin, /opt/homebrew/bin)"
+      warn "node    no popopx-chat binary found and --no-node-download is set"
       warn "        build it: cd <popopx-chat checkout> && cabal build popopx-chat && cabal list-bin popopx-chat"
+      warn "        or pass --node-bin PATH, or drop --no-node-download"
       problems=$((problems + 1))
     fi
   fi
@@ -538,26 +692,45 @@ PYEOF
   echo
 }
 
-ensure_node_conf() { # written once, never rewritten; the plist is generated FROM it
-  local conf="${CONF_DIR}/node.conf"
+ensure_node_conf() { # $1 = target path; written once, never rewritten; the WRAPPER sources it
+  local conf="$1"
   if [[ -f "${conf}" ]]; then
     log "keeping the existing ${conf} (edited by hand, never rewritten here)"
     return 0
   fi
   cat > "${conf}" <<NODECONF
 # POPOPX chat node — created by install_macos.sh on $(date -u +%FT%TZ), edited by hand after that.
+# Read at runtime by ${INSTALL_ROOT}/bin/popopx-node, the node wrapper the LaunchDaemon execs.
+# Unlike the gateway's env file, launchd gives the node no variable expansion in
+# ProgramArguments, so these values are expanded by that wrapper, not by launchd.
+
+# Absolute path to the node binary the wrapper runs. --with-node downloads and SHA256-
+# verifies popopx-chat into here when nothing is found locally; edit to point at your own.
+NODE_BIN_INSTALL=${NODE_BIN_INSTALL}
 # Prefix for the node's chat + agent databases. It lives under the state directory on
 # purpose: one directory to back up is one failure mode, and this suite's backup story
 # is "the state directory", not "the state directory plus wherever the node went".
 NODE_DB_PREFIX=${NODE_DB_PREFIX}
-# The node's WebSocket API port the gateway dials. install_macos.sh --with-node writes
-# this value into the gateway env file too, because launchd, unlike systemd, does not
-# expand variables in ProgramArguments: the plist carries a literal, so the plist is
-# GENERATED from this file. Edit here, then re-run the installer to move the service.
+# The node's WebSocket API port the gateway dials. install_macos.sh --with-node writes the
+# same number into the gateway env file (POPOPX_NODE_WS_URL) from the same run, so the two
+# cannot drift the way install_ubuntu22.sh:380-383 warns an operator to avoid by hand.
 NODE_PORT=${NODE_PORT}
+# SMP / XFTP cluster override — OPTIONAL; empty inherits the binary's own preset, and empty
+# is the intended default. The popopx-chat binary POPOPX ships already presets its dual-stack
+# production cluster smp1..8.popopx.im (public host + .onion), so leaving these blank reaches
+# that cluster. Fill them ONLY to point the node somewhere else, and then copy the FULL
+# "smp://<key>@<host>,<onion>.onion" address: a bare hostname loses the server key and the
+# .onion, so it is not dual-stack and will not verify against a preset cluster. Space-separated;
+# the wrapper passes the whole value as ONE quoted argument, e.g.
+#   NODE_SMP_SERVERS="smp://KEY=@smp1.example.com,aaa.onion smp://KEY=@smp2.example.com,bbb.onion"
+NODE_SMP_SERVERS=
+NODE_XFTP_SERVERS=
+# Used ONLY when reusing an existing node profile whose display name must match: the node
+# compares it against the active user and exits on a mismatch (src/Popopx/Chat/Core.hs:79-82),
+# so an empty value is correct for a fresh identity — the node then creates its own profile.
+NODE_DISPLAY_NAME=
 NODECONF
   chmod 0600 "${conf}"
-  chown "${RUN_USER}:${RUN_USER}" "${conf}" 2>/dev/null || true
 }
 
 # ─────────────────────────── service account ────────────────────────────────
@@ -772,37 +945,62 @@ render_gateway_plist() { # stdout
 PLIST
 }
 
-render_node_plist() { # $1 = binary path; stdout
-  local bin="$1"
+render_node_wrapper() { # stdout; the LaunchDaemon execs this, and it sources node.conf
+  # A single stable ProgramArguments entry is how launchd gets the variable expansion it
+  # lacks: every runtime value comes from node.conf, so the plist never bakes a port or a
+  # path that would go silently stale when the operator edits the config. Quoted heredoc on
+  # purpose — nothing here expands at generation time; the config path arrives as an env var.
+  cat <<'WRAPPER'
+#!/bin/sh
+# POPOPX chat node — secure launcher generated by install_macos.sh --with-node.
+# The installer regenerates this file; edit node.conf, not this. It runs as the node
+# service account and reads nothing but node.conf — never the gateway's env file or token.
+set -eu
+umask 077
+CONF="${POPOPX_NODE_CONF:?popopx-node: POPOPX_NODE_CONF not set by the LaunchDaemon}"
+[ -r "${CONF}" ] || { echo "popopx-node: cannot read ${CONF}" >&2; exit 1; }
+# shellcheck disable=SC1090
+. "${CONF}"
+: "${NODE_PORT:?popopx-node: NODE_PORT missing from ${CONF}}"
+: "${NODE_DB_PREFIX:?popopx-node: NODE_DB_PREFIX missing from ${CONF}}"
+BIN="${NODE_BIN_INSTALL:?popopx-node: NODE_BIN_INSTALL missing from ${CONF}}"
+[ -x "${BIN}" ] || { echo "popopx-node: node binary not executable: ${BIN}" >&2; exit 1; }
+set -- --chat-server-port "${NODE_PORT}" --database "${NODE_DB_PREFIX}" --yes-migrate
+# Cluster override ONLY when the operator set it; empty means "use the binary's own preset
+# cluster" (the intended default — see node.conf). Passing "$@" keeps a space-separated
+# value as ONE argument, which is exactly what the node's --server/--xftp-server expect.
+if [ -n "${NODE_SMP_SERVERS:-}" ]; then set -- "$@" --server "${NODE_SMP_SERVERS}"; fi
+if [ -n "${NODE_XFTP_SERVERS:-}" ]; then set -- "$@" --xftp-server "${NODE_XFTP_SERVERS}"; fi
+if [ -n "${NODE_DISPLAY_NAME:-}" ]; then set -- "$@" --user-display-name "${NODE_DISPLAY_NAME}"; fi
+exec "${BIN}" "$@"
+WRAPPER
+}
+
+render_node_plist() { # stdout; launchd execs the wrapper, which sources node.conf
   cat <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- Generated by install_macos.sh --with-node on $(date -u +%FT%TZ).
      Regenerate by re-running the installer; edits here are overwritten.
-     The values below are literals because launchd does not expand variables in
-     ProgramArguments. They come from ${CONF_DIR}/node.conf. -->
+     ProgramArguments is the node wrapper, not the binary with literal flags: launchd does
+     not expand variables in ProgramArguments, so the wrapper reads ${CONF_DIR}/node.conf and
+     builds the arguments there. POPOPX_NODE_CONF is the only value the wrapper needs at exec
+     time; the port, database prefix and any cluster override all live in node.conf.
+     The wrapper (not this plist) carries the --user-display-name decision: the flag exits the
+     node when it disagrees with an existing profile (src/Popopx/Chat/Core.hs:79-82), so it is
+     passed only when node.conf sets NODE_DISPLAY_NAME, never unconditionally. -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
     <string>${NODE_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>${bin}</string>
-        <string>--chat-server-port</string>
-        <string>${NODE_PORT}</string>
-        <string>--database</string>
-        <string>${NODE_DB_PREFIX}</string>
-        <string>--yes-migrate</string>
+        <string>${INSTALL_ROOT}/bin/popopx-node</string>
     </array>
-    <!-- No --user-display-name, deliberately. The flag is not a no-op: the node
-         compares it against the active profile and exits when they differ
-         (src/Popopx/Chat/Core.hs:79-82), so passing it unconditionally — which is
-         what install_ubuntu22.sh:399 does under systemd — turns a rename into an
-         infinite restart loop here. A fresh account has no profile, so the node's
-         own first-run path creates one. start_macos.sh:330-345 makes the same call
-         for the same reason. -->
     <key>EnvironmentVariables</key>
     <dict>
+        <key>POPOPX_NODE_CONF</key>
+        <string>${CONF_DIR}/node.conf</string>
         <key>HOME</key>
         <string>${STATE_DIR}/node-home</string>
         <key>PATH</key>
@@ -866,13 +1064,29 @@ install_node_unit() {
   local bin
   bin="${NODE_BIN_RESOLVED}"
   [[ -x "${bin}" ]] || die_code 4 "no node binary at ${bin}"
+  NODE_BIN_INSTALL="${bin}"
   NODE_DB_PREFIX="${STATE_DIR}/node/popopx_v1"
-  ensure_node_conf
+  # NODE_SOURCE is set by download_node_bin; if the binary was local (--node-bin or find_node_bin),
+  # record that so the provenance file (written by ensure_node_conf) is honest about origin.
+  : "${NODE_SOURCE:=local:${bin}}"
   create_role_account "${NODE_USER}" "${NODE_UID}" "${STATE_DIR}/node-home"
   install -d -m 0750 -o "${NODE_USER}" -g "${NODE_USER}" "${STATE_DIR}/node" "${STATE_DIR}/node-home"
   chown "${NODE_USER}:${NODE_USER}" "${NODE_DB_PREFIX%/*}" 2>/dev/null || true
-  install_plist "${NODE_LABEL}" "$(render_node_plist "${bin}")"
+  # node.conf must be readable by NODE_USER (the wrapper sources it at runtime), so chown after write.
+  ensure_node_conf "${CONF_DIR}/node.conf"
+  chown "${NODE_USER}:${NODE_USER}" "${CONF_DIR}/node.conf"
+  chmod 0600 "${CONF_DIR}/node.conf"
+  # The wrapper is the single ProgramArguments entry in the plist; it sources node.conf and builds
+  # the node's argv. Installing it as root:wheel 0750 means NODE_USER can read+exec but not modify.
+  render_node_wrapper > "${INSTALL_ROOT}/bin/popopx-node"
+  chmod 0750 "${INSTALL_ROOT}/bin/popopx-node"
+  chown root:wheel "${INSTALL_ROOT}/bin/popopx-node"
+  install_plist "${NODE_LABEL}" "$(render_node_plist)"
   bootstrap_job "${NODE_LABEL}"
+  # Bounded wait: the node takes a few seconds to bind its port after launchd kicks it. If it
+  # does not answer in 40s, warn (do not die) — verify() will catch it later, and the operator
+  # may have a slow machine or a firewall rule to add.
+  wait_for_node_ready 40 || warn "node did not bind port ${NODE_PORT} within 40s; check ${LOG_DIR}/node.err.log"
   log "node installed as ${NODE_LABEL} (${bin}), databases under ${NODE_DB_PREFIX}"
   log "a production node under ${NODE_USER} is a NEW identity. It does not read or copy"
   log "the developer's ~/.popopx profile — the port and the account are different on purpose."
@@ -1078,12 +1292,47 @@ dry_run() {
   log "gateway plist linted: ${plist}"
 
   if [[ ${WITH_NODE} -eq 1 ]]; then
-    local bin
-    bin="$(find_node_bin || true)"
-    [[ -n "${bin}" ]] || die_code 4 "--with-node: no node binary found (--node-bin PATH, PATH, /usr/local/bin, /opt/homebrew/bin)"
+    local bin arch asset
+    arch="$(uname -m)"
+    asset="$(node_asset_name || echo '<unsupported arch>')"
+    log "node    arch=${arch}, target asset=${asset}"
+    # Binary resolution priority: explicit --node-bin > local find_node_bin > download plan.
+    # In dry-run we do NOT actually download; we only show what would happen.
+    bin=""
+    if [[ -n "${NODE_BIN}" ]]; then
+      [[ -x "${NODE_BIN}" ]] || die_code 4 "--node-bin ${NODE_BIN} is not executable"
+      bin="${NODE_BIN}"
+      log "node    binary (explicit --node-bin): ${bin}"
+    else
+      # Avoid command substitution in the elif condition: under set -e the ERR trap fires
+      # on the failed exit status even though elif should suppress it. Use a temp var instead.
+      local found_bin
+      found_bin="$(find_node_bin 2>/dev/null || true)"
+      if [[ -n "${found_bin}" ]]; then
+        bin="${found_bin}"
+        log "node    binary (local): ${bin}"
+      elif [[ ${NODE_DOWNLOAD} -eq 1 ]]; then
+        log "node    no local binary; would download ${asset} from GitHub Releases (popopx-chat/popopx-chat)"
+        log "node    (dry run does not fetch; the real install will verify SHA2-256 and write .provenance)"
+        # Set a placeholder so the wrapper/node.conf render below has something to lint against.
+        bin="/tmp/popopx-chat-dryrun"
+        NODE_BIN_INSTALL="${bin}"
+        NODE_SOURCE="dryrun:would-download-${asset}"
+      else
+        die_code 4 "--with-node + --no-node-download: no local binary found; cannot proceed"
+      fi
+    fi
     NODE_DB_PREFIX="${STATE_DIR}/node/popopx_v1"
     NODE_BIN_RESOLVED="${bin}"
-    render_node_plist "${bin}" > "${scratch}/${NODE_LABEL}.plist"
+    # Render node.conf + wrapper + plist to scratch; lint each. The wrapper is POSIX sh, so
+    # sh -n is the syntax check. The plist is now wrapper-based (no literal flags).
+    ensure_node_conf "${scratch}/node.conf"
+    log "node.conf rendered: ${scratch}/node.conf"
+    render_node_wrapper > "${scratch}/popopx-node"
+    chmod 0750 "${scratch}/popopx-node"
+    sh -n "${scratch}/popopx-node" || die "wrapper failed sh -n syntax check"
+    log "wrapper linted: ${scratch}/popopx-node"
+    render_node_plist > "${scratch}/${NODE_LABEL}.plist"
     plutil -lint "${scratch}/${NODE_LABEL}.plist"
     log "node plist linted: ${scratch}/${NODE_LABEL}.plist"
     warn "the node unit is GENERATED and linted here, not installed and not started. What"
@@ -1155,9 +1404,22 @@ if [[ ${DRY_RUN} -eq 1 ]]; then
 fi
 
 if [[ ${WITH_NODE} -eq 1 ]]; then
-  NODE_BIN_RESOLVED="$(find_node_bin || true)"
-  [[ -n "${NODE_BIN_RESOLVED}" ]] || die_code 4 "no popopx-chat node found. Build it: cd <popopx-chat checkout> && cabal build popopx-chat && cabal list-bin popopx-chat — or pass --node-bin PATH. (If a node is already running that you maintain yourself, install without --with-node.)"
-  log "node binary: ${NODE_BIN_RESOLVED}"
+  # Binary resolution priority: explicit --node-bin > local find_node_bin > download (unless --no-node-download).
+  # The download path is the new default when nothing local exists; --no-node-download keeps the old behavior.
+  NODE_BIN_RESOLVED=""
+  if [[ -n "${NODE_BIN}" ]]; then
+    [[ -x "${NODE_BIN}" ]] || die_code 4 "--node-bin ${NODE_BIN} is not executable"
+    NODE_BIN_RESOLVED="${NODE_BIN}"
+    log "node binary (explicit --node-bin): ${NODE_BIN_RESOLVED}"
+  elif NODE_BIN_RESOLVED="$(find_node_bin 2>/dev/null)"; then
+    log "node binary (local): ${NODE_BIN_RESOLVED}"
+  elif [[ ${NODE_DOWNLOAD} -eq 1 ]]; then
+    log "no local node binary; downloading from GitHub Releases"
+    NODE_BIN_RESOLVED="$(download_node_bin)"
+    log "node binary (downloaded): ${NODE_BIN_RESOLVED}"
+  else
+    die_code 4 "no popopx-chat node found and --no-node-download is set. Build it: cd <popopx-chat checkout> && cabal build popopx-chat && cabal list-bin popopx-chat — or pass --node-bin PATH, or drop --no-node-download. (If a node is already running that you maintain yourself, install without --with-node.)"
+  fi
   NODE_WS_URL="ws://127.0.0.1:${NODE_PORT}"
 fi
 
@@ -1174,12 +1436,16 @@ make_dirs
 build_venv
 ensure_env_file "${CONF_DIR}/env"
 config_gate
-install_plist "${GATEWAY_LABEL}" "$(render_gateway_plist)"
-bootstrap_job "${GATEWAY_LABEL}"
 
+# Node before gateway: the gateway's env file carries NODE_WS_URL, and the gateway expects
+# the node to answer on that socket. Bringing the node up first means the gateway's first
+# /healthz probe sees a live node, not a "connection refused" that would fail verify().
 if [[ ${WITH_NODE} -eq 1 ]]; then
   install_node_unit
 fi
+
+install_plist "${GATEWAY_LABEL}" "$(render_gateway_plist)"
+bootstrap_job "${GATEWAY_LABEL}"
 
 # verify() returns 5 when the service is installed but /healthz stayed silent. It must
 # not be a bare statement: under set -e the ERR trap would fire first and the run would
