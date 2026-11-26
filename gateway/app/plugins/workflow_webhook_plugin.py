@@ -56,6 +56,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from app import admin_auth
 from app.connectors import (
     ConnectorError,
     audit_rows,
@@ -838,6 +839,8 @@ def create_router(deps: PluginDeps) -> "APIRouter":
         return JSONResponse(status_code=int(status), content=dict(body))
 
     def admin_refused(request: "Request") -> Optional[Any]:
+        if admin_auth.grant_from_request(request) is not None:
+            return None
         ok, reason = authorize_admin(request.headers, getattr(deps.config, "admin_token", ""))
         if ok:
             return None
@@ -910,11 +913,13 @@ def create_router(deps: PluginDeps) -> "APIRouter":
         secret = secrets.token_urlsafe(32)
         subscription_id = new_id("wfs")
         now = _now_ms()
+        sealed_secret = deps.vault.seal(secret, table="workflow_subscriptions",
+                                        column="secret", subject=subscription_id)
         deps.db.execute(
             "INSERT INTO workflow_subscriptions"
             " (id, label, url, secret, scopes, allow_private, active, created_at_ms, updated_at_ms, failures, next_attempt_ms)"
             " VALUES (?,?,?,?,?,?,1,?,?,0,0)",
-            (subscription_id, label, endpoint.origin + endpoint.target, secret, _json_body(list(scopes)),
+            (subscription_id, label, endpoint.origin + endpoint.target, sealed_secret, _json_body(list(scopes)),
              int(allow_private), now, now),
         )
         record_audit(deps.db, connector="workflow", direction="outbound", action="subscription.create",
@@ -947,14 +952,19 @@ def create_router(deps: PluginDeps) -> "APIRouter":
         active = int(bool(body.get("active", current.get("active"))))
         secret = str(current.get("secret") or "")
         rotate = bool(body.get("rotate_secret"))
+        # The stored value may already be sealed; only a rotation mints a new
+        # plaintext, and only that new value is sealed under this row's subject.
+        sealed_secret = secret
         if rotate:
             secret = secrets.token_urlsafe(32)
+            sealed_secret = deps.vault.seal(secret, table="workflow_subscriptions",
+                                            column="secret", subject=subscription_id)
         if endpoint is not None:
             url = endpoint.origin + endpoint.target
         deps.db.execute(
             "UPDATE workflow_subscriptions SET label = ?, url = ?, secret = ?, scopes = ?, allow_private = ?,"
             " active = ?, updated_at_ms = ?, failures = 0, next_attempt_ms = 0, last_error = NULL WHERE id = ?",
-            (label, url, secret, _json_body(list(scopes)), int(allow_private), active, _now_ms(), subscription_id),
+            (label, url, sealed_secret, _json_body(list(scopes)), int(allow_private), active, _now_ms(), subscription_id),
         )
         record_audit(deps.db, connector="workflow", direction="outbound", action="subscription.update",
                      source="subscription:%s" % subscription_id, scope=scopes, outcome="updated", status_code=200)
@@ -1098,7 +1108,10 @@ async def _deliver(deps: PluginDeps, subscription: Mapping[str, Any], body: byte
     started = _now_ms()
     subscription_id = str(subscription["id"])
     try:
-        headers = build_signature_headers(str(subscription["secret"]), body, int(time.time()))
+        plaintext_secret = deps.vault.open(str(subscription.get("secret") or ""),
+                                           table="workflow_subscriptions", column="secret",
+                                           subject=subscription_id)
+        headers = build_signature_headers(plaintext_secret, body, int(time.time()))
         headers.update({
             "Content-Type": "application/json",
             "User-Agent": "POPOPX-Workflow/1.0",

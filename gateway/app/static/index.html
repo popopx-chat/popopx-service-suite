@@ -361,6 +361,10 @@ var API = {
   outboxDrain:  ["POST", "/api/v1/outbox/drain"],
   outboxDelete: ["DELETE", "/api/v1/outbox/{outbox_id}"],
   outboxRetry:  ["POST", "/api/v1/outbox/{outbox_id}/retry"],
+  adminTokens:  ["GET", "/api/v1/admin/tokens"],
+  adminTokenMint:["POST", "/api/v1/admin/tokens"],
+  adminTokenAudit:["GET", "/api/v1/admin/tokens/audit"],
+  adminTokenRevoke:["DELETE", "/api/v1/admin/tokens/{token_id}"],
   settings:     ["GET", "/api/v1/settings"],
   settingPut:   ["PUT", "/api/v1/settings/{key}"],
   diagnostics:  ["GET", "/api/v1/diagnostics"],
@@ -442,7 +446,16 @@ var API = {
   caldavConfigPut: ["PUT", "/api/v1/plugins/caldav/config"],
   caldavProbe: ["POST", "/api/v1/plugins/caldav/probe"],
   caldavFreebusy: ["POST", "/api/v1/plugins/caldav/freebusy"],
-  caldavAudit: ["GET", "/api/v1/plugins/caldav/audit"]
+  caldavAudit: ["GET", "/api/v1/plugins/caldav/audit"],
+
+  /* —— 插件：Slack / Discord 出站桥 —— */
+  slackDiscordStatus: ["GET", "/api/v1/plugins/slackdiscord/status"],
+  slackDiscordWorkspaces: ["GET", "/api/v1/plugins/slackdiscord/workspaces"],
+  slackWorkspaceAdd: ["POST", "/api/v1/plugins/slackdiscord/workspaces"],
+  slackWorkspacePatch: ["PATCH", "/api/v1/plugins/slackdiscord/workspaces/{workspace_id}"],
+  slackWorkspaceDel: ["DELETE", "/api/v1/plugins/slackdiscord/workspaces/{workspace_id}"],
+  slackDiscordSend: ["POST", "/api/v1/plugins/slackdiscord/send"],
+  slackDiscordAudit: ["GET", "/api/v1/plugins/slackdiscord/audit"]
 };
 
 /* 导航目标：不由 fetch 调用，而是拼成链接交给浏览器/手机打开。
@@ -460,7 +473,8 @@ var PLUGINS = [
   { key: "web3",   id: "web3_bridge",  name: "Web3 桥",   meter: "web3_event", prefix: "/api/v1/plugins/web3" },
   { key: "workflow", id: "workflow_webhook", name: "开放工作流", meter: "workflow_event", prefix: "/api/v1/plugins/workflow" },
   { key: "carddav", id: "carddav_connector", name: "CardDAV 通讯录", meter: "carddav_query", prefix: "/api/v1/plugins/carddav" },
-  { key: "caldav", id: "caldav_connector", name: "CalDAV 日历", meter: "caldav_query", prefix: "/api/v1/plugins/caldav" }
+  { key: "caldav", id: "caldav_connector", name: "CalDAV 日历", meter: "caldav_query", prefix: "/api/v1/plugins/caldav" },
+  { key: "slackdiscord", id: "slack_discord", name: "Slack / Discord 出站桥", meter: "slack_discord_event", prefix: "/api/v1/plugins/slackdiscord" }
 ];
 
 var NAV = [
@@ -490,6 +504,7 @@ var NAV = [
   { grp: "运维", items: [
       { k: "outbox", n: "出站队列" },
       { k: "callbacks", n: "回调" },
+      { k: "tokens", n: "API 令牌" },
       { k: "settings", n: "设置" },
       { k: "diagnostics", n: "诊断" }
   ] }
@@ -1189,7 +1204,7 @@ VIEWS.overview = function (host) {
   var nodeS = section("节点链路", "与本机 SimpleX 节点的 ws 通道");
   var billS = section("算力", "POPX-CP：默认开箱即用；兑换即入账，开启准入后耗尽即熔断插件");
   var reachS = section("触达与存储", "各表行数取自 GET /api/v1/status 的 counts");
-  var plugS = section("插件", "八个插件的装载、开关与熔断状态", [btn("插件详情", function () { location.hash = "#ai"; return null; }, { tone: "mini gho" })]);
+  var plugS = section("插件", "九个插件的装载、开关与熔断状态", [btn("插件详情", function () { location.hash = "#ai"; return null; }, { tone: "mini gho" })]);
   var auditS = section("邀请链接审计", "只保留脱敏前缀与生成时间，不保存密文或明文地址");
   var auditOut = h("div");
   auditS.body.appendChild(h("div", { class: "row" },
@@ -3489,9 +3504,11 @@ VIEWS.workflows = function (host) {
   var headWf = pluginHeader("workflow", "workflowStatus");
   var headCd = pluginHeader("carddav", "carddavStatus");
   var headCal = pluginHeader("caldav", "caldavStatus");
+  var headSd = pluginHeader("slackdiscord", "slackDiscordStatus");
   host.appendChild(headWf.node);
   host.appendChild(headCd.node);
   host.appendChild(headCal.node);
+  host.appendChild(headSd.node);
 
   var subS = section("出站 Webhook 订阅", "事件推到 Node-RED / Activepieces 的入口；每个订阅独立签名密钥，只发被勾选的 scope");
   var tokS = section("入站触发令牌", "流程节点调用 POST /api/v1/workflows/trigger 时携带 X-PPX-Workflow-Token；令牌只显示一次");
@@ -3833,10 +3850,106 @@ VIEWS.workflows = function (host) {
     });
   }
 
+  /* —— Slack / Discord 出站桥 —— */
+  var sdS = section("Slack / Discord 出站桥", "每个工作区一个 incoming webhook；URL 与签名密钥落盘即密封，控制台只显示主机名，正文不落库");
+  host.appendChild(sdS.node);
+  var sdPlatform = sel([["slack", "Slack"], ["discord", "Discord"]], { class: "in" });
+  var sdLabel = inp({ placeholder: "例如 运维告警频道" });
+  var sdUrl = inp({ class: "in mono", placeholder: "https://hooks.slack.com/services/…", type: "password" });
+  var sdPrivate = chk("允许本机回环接收端（仅离线测试）", false);
+  var sdOut = h("div"), sdList = h("div"), sdAudOut = h("div");
+  var sdSendId = inp({ class: "in mono", placeholder: "workspace id（从下方列表复制）" });
+  var sdSendText = area({ rows: 2, placeholder: "发送到 Slack/Discord 的文本；服务端不保存" });
+  var sdSendTitle = inp({ placeholder: "标题（可选）" });
+  sdS.body.appendChild(h("div", { class: "grid2" }, field("平台", sdPlatform), field("名称", sdLabel)));
+  sdS.body.appendChild(h("div", { style: "margin-top:8px" }, field("Incoming Webhook URL", sdUrl, "公网必须是 Slack/Discord 官方主机；URL 本身是凭据，保存后不再回显")));
+  sdS.body.appendChild(h("div", { style: "margin-top:8px" }, sdPrivate.node));
+  sdS.body.appendChild(h("div", { class: "row", style: "margin-top:10px" },
+    btn("创建工作区", function () {
+      if (!String(sdUrl.value || "").trim()) { toast("需要 Webhook URL", "bad"); return Promise.reject(new ApiError("缺少 URL", { status: 0, code: "console_missing_url" })); }
+      var body = { platform: sdPlatform.value, webhook_url: String(sdUrl.value).trim(), allow_private: sdPrivate.get() };
+      if (String(sdLabel.value || "").trim()) body.label = String(sdLabel.value).trim();
+      return call("slackWorkspaceAdd", { body: body }).then(function (r) {
+        sdOut.appendChild(resultBox("工作区已创建：签名密钥只显示这一次", r));
+        sdUrl.value = ""; sdLabel.value = "";
+        return refreshSd();
+      });
+    }, { tone: "pri", out: function () { return sdOut; } }),
+    btn("刷新列表", function () { return refreshSd(); }, { tone: "gho" }),
+    btn("审计", function () {
+      return call("slackDiscordAudit", { query: { limit: 200 } }).then(function (r) {
+        clear(sdAudOut);
+        sdAudOut.appendChild(tableOf([
+          { label: "时间", get: function (a) { return ago(a.created_at_ms); } },
+          { label: "工作区", get: function (a) { return h("span", { class: "mono", text: short(a.workspace_id, 10, 4) }); } },
+          { label: "动作", k: "action" },
+          { label: "结果", k: "outcome" },
+          { label: "HTTP", get: function (a) { return a.status_code === null || a.status_code === undefined ? "—" : String(a.status_code); } }
+        ], r.audit || [], "（还没有桥接审计）"));
+        return r;
+      });
+    }, { tone: "mini", out: function () { return sdAudOut; } })));
+  sdS.body.appendChild(sdList);
+  sdS.body.appendChild(sdAudOut);
+  sdS.body.appendChild(h("h4", { class: "sub", text: "发送一条消息" }));
+  sdS.body.appendChild(h("div", { class: "grid2" }, field("workspace id", sdSendId), field("标题", sdSendTitle)));
+  sdS.body.appendChild(h("div", { style: "margin-top:8px" }, field("正文", sdSendText, "最多 2000 字；明文只存在本次请求与出站 HTTP 中")));
+  sdS.body.appendChild(h("div", { class: "row", style: "margin-top:10px" },
+    btn("发送", function () {
+      if (!String(sdSendId.value || "").trim()) { toast("需要 workspace id", "bad"); return Promise.reject(new ApiError("缺少 workspace id", { status: 0, code: "console_missing_workspace" })); }
+      if (!String(sdSendText.value || "").trim()) { toast("需要正文", "bad"); return Promise.reject(new ApiError("缺少正文", { status: 0, code: "console_missing_text" })); }
+      var body = { workspace_id: String(sdSendId.value).trim(), text: String(sdSendText.value) };
+      if (String(sdSendTitle.value || "").trim()) body.title = String(sdSendTitle.value).trim();
+      return call("slackDiscordSend", { body: body }).then(function (r) {
+        sdOut.appendChild(resultBox("投递结果", r));
+        sdSendText.value = "";
+        return Promise.all([loadAccount(), refreshSd()]).then(function () { paintBar(); headSd.paint(); });
+      });
+    }, { tone: "pri", out: function () { return sdOut; } })));
+  sdS.body.appendChild(sdOut);
+
+  function refreshSd() {
+    return call("slackDiscordWorkspaces").then(function (r) {
+      clear(sdList);
+      sdList.appendChild(tableOf([
+        { label: "id", get: function (w) { return h("span", { class: "mono", text: short(w.id, 10, 4) }); } },
+        { label: "名称", k: "label" },
+        { label: "平台", k: "platform" },
+        { label: "主机", get: function (w) { return h("span", { class: "mono", text: w.url_host }); } },
+        { label: "状态", get: function (w) { return w.active ? chip("启用", "g") : chip("已停用", "b"); } },
+        { label: "密钥", get: function (w) { return w.secret_set ? chip("已设置", "i") : chip("缺失", "w"); } },
+        { label: "最近投递", get: function (w) {
+            if (!w.last_delivery_ms) return "—";
+            return h("span", { title: w.last_error || "", text: ago(w.last_delivery_ms) + (w.last_status_code ? " · HTTP " + w.last_status_code : "") });
+          } },
+        { label: "操作", get: function (w) {
+            return h("div", { class: "row" },
+              btn(w.active ? "停用" : "启用", function () {
+                return call("slackWorkspacePatch", { params: { workspace_id: w.id }, body: { active: !w.active } }).then(function (r) {
+                  sdOut.appendChild(resultBox("工作区", r)); return refreshSd();
+                });
+              }, { tone: "mini gho", out: function () { return sdOut; } }),
+              btn("换密钥", function () {
+                return call("slackWorkspacePatch", { params: { workspace_id: w.id }, body: { rotate_secret: true } }).then(function (r) {
+                  sdOut.appendChild(resultBox("新签名密钥（只显示这一次）", r)); return refreshSd();
+                });
+              }, { tone: "mini", out: function () { return sdOut; }, confirm: "旧密钥立即失效。确认？" }),
+              btn("删除", function () {
+                return call("slackWorkspaceDel", { params: { workspace_id: w.id } }).then(function (r) {
+                  sdOut.appendChild(resultBox("已删除", r)); return refreshSd();
+                });
+              }, { tone: "mini dan", out: function () { return sdOut; }, confirm: "删除后该工作区不再收到任何消息。确认？" }));
+          } }
+      ], r.workspaces || [], "（还没有工作区）"));
+      return r;
+    });
+  }
+
   refreshSubs().catch(function (e) { renderError(subList, e); });
   refreshTokens().catch(function (e) { renderError(tokList, e); });
   loadCdConfig().catch(function (e) { renderError(cdCfgOut, e); });
   loadCalConfig().catch(function (e) { renderError(calCfgOut, e); });
+  refreshSd().catch(function (e) { renderError(sdList, e); });
 };
 
 /* ======================================================================== *
@@ -3953,6 +4066,83 @@ VIEWS.callbacks = function (host) {
     });
   }
   load().catch(function (e) { renderError(out, e); });
+};
+
+VIEWS.tokens = function (host) {
+  var mintS = section("铸造细粒度令牌", "root 令牌只能用于这里；新令牌的明文只返回一次");
+  var listS = section("已签发令牌", "只保存 SHA-256；列表只显示前缀，root 令牌不在表中");
+  var auditS = section("令牌审计", "scoped 请求的路径、结果与状态码；不含请求头、令牌或正文");
+  [mintS, listS, auditS].forEach(function (x) { host.appendChild(x.node); });
+
+  var labelIn = inp({ class: "in", placeholder: "用途（例如 grafana-monitor）" });
+  var scopesIn = inp({ class: "in", placeholder: "core:status:ro, plugin:slack_discord:ro" });
+  var daysSel = sel([["", "永不过期"], ["7", "7 天"], ["30", "30 天"], ["90", "90 天"], ["365", "365 天"]], { class: "in mini" });
+  var mintOut = h("div");
+  mintS.body.appendChild(h("div", { class: "grid2" },
+    field("用途", labelIn),
+    field("作用域", scopesIn, "core:<资源>:ro|rw、plugin:<id>:ro|rw；* 为除令牌管理外的全部权限"),
+    field("有效期", daysSel)));
+  mintS.body.appendChild(h("div", { class: "row", style: "margin-top:10px" },
+    btn("签发令牌", function () {
+      var scopes = String(scopesIn.value || "").split(/[,\s]+/).filter(function (s) { return s; });
+      var body = { label: String(labelIn.value || "").trim(), scopes: scopes };
+      if (daysSel.value) body.expires_in_days = Number(daysSel.value);
+      return call("adminTokenMint", { body: body }).then(function (r) {
+        mintOut.appendChild(resultBox("已签发；明文只出现这一次", r));
+        return loadList();
+      });
+    }, { tone: "pri", out: function () { return mintOut; } }),
+    btn("重新读取", function () { return loadAll(); }, { tone: "gho" })));
+  mintS.body.appendChild(mintOut);
+
+  var listOut = h("div");
+  listS.body.appendChild(listOut);
+  var auditOut = h("div");
+  auditS.body.appendChild(auditOut);
+
+  function loadList() {
+    return call("adminTokens").then(function (r) {
+      clear(listOut);
+      listOut.appendChild(tableOf([
+        { label: "用途", k: "label" },
+        { label: "前缀", get: function (t) { return h("span", { class: "mono", text: t.token_prefix || "—" }); } },
+        { label: "作用域", get: function (t) { return (t.scopes || []).map(function (s) { return chip(s, ""); }); } },
+        { label: "创建", get: function (t) { return ago(t.created_at_ms); } },
+        { label: "最近使用", get: function (t) { return t.last_used_at_ms ? ago(t.last_used_at_ms) : "从未"; } },
+        { label: "过期", get: function (t) { return t.expires_at_ms ? localDate(t.expires_at_ms) : "永不"; } },
+        { label: "状态", get: function (t) { return chip(t.revoked ? "已吊销" : "有效", t.revoked ? "b" : "g"); } },
+        { label: "id", get: function (t) { return h("span", { class: "mono", text: t.id }); } },
+        { label: "操作", get: function (t) {
+            if (t.revoked) return "—";
+            return btn("吊销", function () {
+              return call("adminTokenRevoke", { params: { token_id: t.id } })
+                .then(function (r) { mintOut.appendChild(resultBox("已吊销 " + t.id, r)); return loadAll(); });
+            }, { tone: "mini dan", out: function () { return mintOut; }, confirm: "吊销后该令牌立即失效，且不可恢复。确认？" });
+          } }
+      ], r.tokens || [], "（还没有签发过 scoped 令牌）"));
+      return r;
+    });
+  }
+
+  function loadAudit() {
+    return call("adminTokenAudit", { query: { limit: 100 } }).then(function (r) {
+      clear(auditOut);
+      auditOut.appendChild(tableOf([
+        { label: "时间", get: function (a) { return localDate(a.created_at_ms).slice(5); } },
+        { label: "action", get: function (a) { return chip(a.action, a.action === "request" ? "i" : ""); } },
+        { label: "结果", get: function (a) { return chip(a.outcome, (a.outcome === "used" || a.outcome === "created") ? "g" : (a.outcome === "scope_denied" ? "w" : "b")); } },
+        { label: "状态码", get: function (a) { return a.status_code === null || a.status_code === undefined ? "—" : String(a.status_code); } },
+        { label: "令牌", get: function (a) { return a.token_id ? h("span", { class: "mono", text: a.token_id }) : "—"; } },
+        { label: "路径", get: function (a) { return h("span", { class: "mono", text: a.path || "—" }); } }
+      ], r.audit || [], "（还没有审计记录）"));
+      return r;
+    });
+  }
+
+  function loadAll() {
+    return Promise.all([loadList(), loadAudit()]);
+  }
+  loadAll().catch(function (e) { renderError(listOut, e); });
 };
 
 VIEWS.settings = function (host) {

@@ -106,6 +106,7 @@ except ImportError:  # pragma: no cover — the wheels-less self-test path
     Request = Any  # type: ignore[assignment,misc]
     FileResponse = HTMLResponse = JSONResponse = Any  # type: ignore[assignment]
 
+from app import admin_auth
 from app.agent_bridge import (
     AgentBridge,
     InboundCallback,
@@ -161,6 +162,7 @@ from app.crypto_service import (
     epoch_secret_plaintext,
 )
 from app.database import Database
+from app.vault import SecretBox, VaultError, vault_for
 from app.opaque_invite_codec import (
     LINK_PREFIX,
     InviteCodecError,
@@ -184,6 +186,13 @@ from app.plugins import (
 __all__ = ["Gateway", "EcoService", "create_app", "main", "self_test"]
 
 LOG = logging.getLogger("popopx.gateway")
+
+#: The mount table as the scoped-token authorizer needs it: URL prefix → plugin id.
+#: Read from PLUGIN_SPEC rather than written out, so a tenth plugin cannot be
+#: granted under a stale slug.
+ADMIN_PLUGIN_PREFIXES: Dict[str, str] = {
+    str(spec.url_prefix).rstrip("/"): str(spec.plugin_id) for spec in PLUGIN_SPEC
+}
 
 #: The default `serviceId` for a frame. The client displays nothing from it and
 #: only uses it to decide whether a card belongs to this service account, so it
@@ -567,6 +576,7 @@ class EcoService:
         self.db = db
         self.billing = billing
         self.bridge = bridge
+        self.vault: SecretBox = vault_for(config.vault_key)
         self.service_id = str(config.service_id or "popopx.service")
         self.public_base = normalize_base_url(config.public_base_url)
         self.outbox_interval = max(0.05, float(outbox_interval))
@@ -617,10 +627,20 @@ class EcoService:
 
     def _session_from_row(self, row: Any) -> EcoSession:
         data = row_dict(row)
+        contact_id = int(data.get("contact_id") or 0)
         return EcoSession(
-            contact_id=int(data.get("contact_id") or 0),
+            contact_id=contact_id,
             pairwise_uid=str(data.get("pairwise_uid") or ""),
-            secret_hex=str(data.get("secret_hex") or ""),
+            # A vault sealed row holds `vault1:<ciphertext>`; a row written
+            # before the operator turned the key on holds the hex verbatim, and
+            # `open` passes that through unchanged. Both are legal at once, on
+            # purpose: enabling the vault must not require stopping the gateway.
+            secret_hex=self.vault.open(
+                data.get("secret_hex") or "",
+                table="eco_sessions",
+                column="secret_hex",
+                subject=contact_id,
+            ),
             service_id=str(data.get("service_id") or self.service_id),
             revoked=bool(data.get("revoked")),
         )
@@ -645,6 +665,9 @@ class EcoService:
             return self._session_from_row(existing)
         pairwise_uid = validate_pairwise_uid(new_id("pw"))
         secret_hex = validate_secret_hex(new_session_secret())
+        sealed_secret = self.vault.seal(
+            secret_hex, table="eco_sessions", column="secret_hex", subject=contact_id
+        )
         ts = now_ms()
         # The contact row goes in first: `eco_sessions.contact_id` is a foreign
         # key and a handshake for a follower the gateway has never seen before
@@ -659,13 +682,13 @@ class EcoService:
                 conn.execute(
                     "INSERT INTO eco_sessions (pairwise_uid, contact_id, service_id, secret_hex,"
                     " created_at_ms, rotated_at_ms, revoked) VALUES (?, ?, ?, ?, ?, ?, 0)",
-                    (pairwise_uid, contact_id, self.service_id, secret_hex, ts, ts),
+                    (pairwise_uid, contact_id, self.service_id, sealed_secret, ts, ts),
                 )
             else:
                 conn.execute(
                     "UPDATE eco_sessions SET pairwise_uid = ?, service_id = ?, secret_hex = ?,"
                     " rotated_at_ms = ?, revoked = 0 WHERE contact_id = ?",
-                    (pairwise_uid, self.service_id, secret_hex, ts, contact_id),
+                    (pairwise_uid, self.service_id, sealed_secret, ts, contact_id),
                 )
         self.db.execute(
             "UPDATE contacts SET pairwise_uid = ?, last_seen_ms = ? WHERE contact_id = ?",
@@ -1543,7 +1566,12 @@ class EcoService:
                     str(relay or ""),
                     str(title or "")[:120],
                     b64_url(identity_public),
-                    b64_url(identity_private),
+                    self.vault.seal(
+                        b64_url(identity_private),
+                        table="channels",
+                        column="identity_sec_b64url",
+                        subject=text,
+                    ),
                     int(node_group_id) if node_group_id else None,
                     ts,
                 ),
@@ -1551,7 +1579,16 @@ class EcoService:
             conn.execute(
                 "INSERT INTO channel_epochs (channel_id, epoch, key_b64url, created_at_ms, expires_at_ms,"
                 " revoked, sealed_under_epoch, delivered_ms) VALUES (?, 1, ?, ?, NULL, 0, NULL, NULL)",
-                (text, b64_url(epoch_key), ts),
+                (
+                    text,
+                    self.vault.seal(
+                        b64_url(epoch_key),
+                        table="channel_epochs",
+                        column="key_b64url",
+                        subject="%s:1" % text,
+                    ),
+                    ts,
+                ),
             )
         return self.channel_state(text) or {}
 
@@ -1584,7 +1621,12 @@ class EcoService:
         epoch_one = self.db.query_one(
             "SELECT key_b64url FROM channel_epochs WHERE channel_id = ? AND epoch = 1", (str(channel_id),)
         )
-        if epoch_one is not None and values.get("key") != str(row_dict(epoch_one).get("key_b64url") or ""):
+        if epoch_one is not None and values.get("key") != self.vault.open(
+            row_dict(epoch_one).get("key_b64url") or "",
+            table="channel_epochs",
+            column="key_b64url",
+            subject="%s:1" % str(channel_id),
+        ):
             raise conflict(
                 "channel_key_mismatch",
                 "the URI's key= is not this channel's epoch-1 key; members who imported it cannot verify a rotation",
@@ -1619,7 +1661,12 @@ class EcoService:
         )
         if row is None or int(row_dict(row).get("revoked") or 0):
             return None
-        return b64_decode_lenient(str(row_dict(row).get("key_b64url") or ""))
+        return b64_decode_lenient(self.vault.open(
+            row_dict(row).get("key_b64url") or "",
+            table="channel_epochs",
+            column="key_b64url",
+            subject="%s:%d" % (str(channel_id), int(epoch)),
+        ))
 
     def epoch_history(self, channel_id: str) -> List[Dict[str, Any]]:
         rows = self.db.query(
@@ -1662,7 +1709,19 @@ class EcoService:
             conn.execute(
                 "INSERT INTO channel_epochs (channel_id, epoch, key_b64url, created_at_ms, expires_at_ms, revoked,"
                 " sealed_under_epoch, delivered_ms) VALUES (?, ?, ?, ?, ?, 0, ?, NULL)",
-                (str(channel_id), next_epoch, b64_url(epoch_key), ts, expires_at_ms, previous_epoch),
+                (
+                    str(channel_id),
+                    next_epoch,
+                    self.vault.seal(
+                        b64_url(epoch_key),
+                        table="channel_epochs",
+                        column="key_b64url",
+                        subject="%s:%d" % (str(channel_id), next_epoch),
+                    ),
+                    ts,
+                    expires_at_ms,
+                    previous_epoch,
+                ),
             )
             conn.execute("UPDATE channels SET current_epoch = ?, rotated_at_ms = ? WHERE channel_id = ?",
                          (next_epoch, ts, str(channel_id)))
@@ -1809,7 +1868,12 @@ class EcoService:
         )
         if row is None:
             return None
-        return b64_decode_lenient(str(row_dict(row).get("key_b64url") or ""))
+        return b64_decode_lenient(self.vault.open(
+            row_dict(row).get("key_b64url") or "",
+            table="channel_epochs",
+            column="key_b64url",
+            subject="%s:%d" % (str(channel_id), int(epoch)),
+        ))
 
     def channel_public_uri(self, channel_id: str) -> Optional[str]:
         """`popopx://channel/<relay>/<channel_id>#key=<epoch 1>&pub=<identity>`.
@@ -1835,7 +1899,12 @@ class EcoService:
             return build_channel_public_uri(
                 relay,
                 str(channel_id),
-                str(row_dict(epoch_one).get("key_b64url") or ""),
+                self.vault.open(
+                    row_dict(epoch_one).get("key_b64url") or "",
+                    table="channel_epochs",
+                    column="key_b64url",
+                    subject="%s:1" % str(channel_id),
+                ),
                 str(state.get("identity_pub_b64url") or ""),
             )
         except EcoError:
@@ -1974,7 +2043,12 @@ class EcoService:
         )
         if row is None:
             raise not_found("channel_not_found", channel_id)
-        return b64_decode_lenient(str(row_dict(row).get("identity_sec_b64url") or ""))
+        return b64_decode_lenient(self.vault.open(
+            row_dict(row).get("identity_sec_b64url") or "",
+            table="channels",
+            column="identity_sec_b64url",
+            subject=str(channel_id),
+        ))
 
     def members(self, channel_id: str, *, status: Optional[str] = None) -> List[Dict[str, Any]]:
         sql = "SELECT * FROM channel_members WHERE channel_id = ?"
@@ -3348,7 +3422,7 @@ def create_app(config: Optional[Config] = None, *, gateway: Optional[Gateway] = 
     # do not define one, which is what it is for.
     for mounted in gw.plugins.values():
         if mounted.available and mounted.router is not None:
-            # The prefix is conditional because the eight plugins do not agree on who
+            # The prefix is conditional because the nine plugins do not agree on who
             # supplies it, and passing it unconditionally composes two copies:
             # `alert_ops`, `polls` and `web3_bridge` declare their router with
             # `prefix=deps.spec.url_prefix` so that the module answers at its real
@@ -3384,10 +3458,40 @@ def create_app(config: Optional[Config] = None, *, gateway: Optional[Gateway] = 
             raise bad_request("body_must_be_object", "expected a JSON object, got %s" % type(parsed).__name__)
         return parsed
 
-    def admin_required(request: Request) -> None:
-        presented = request.headers.get("x-admin-token") or request.query_params.get("token")
-        if not token_is_valid(presented, gw.config.admin_token):
+    def admin_required(request: Request, *, root_only: bool = False) -> None:
+        """Refuse unless the request carries a credential that covers this route.
+
+        The middleware resolves a scoped token once and attaches the grant; the
+        resolution is repeated here only when a handler is called without that
+        middleware (a unit test, an included router in another app). Keeping the
+        check in the handler is what makes ``route_census()`` able to see it.
+        """
+        grant = admin_auth.grant_from_request(request)
+        if grant is None:
+            presented = admin_auth.presented_credential(
+                request.headers, request.query_params.get("token") or ""
+            )
+            grant, _rejected = admin_auth.resolve_presented(
+                gw.db, presented, gw.config.admin_token, path=request.url.path
+            )
+            if grant is not None:
+                setattr(request.state, admin_auth.STATE_ATTR, grant)
+        if grant is None:
             raise GatewayError(401, "unauthorized", "provide the X-Admin-Token header")
+        resource, resource_root_only = admin_auth.resource_for_path(
+            request.url.path, ADMIN_PLUGIN_PREFIXES
+        )
+        if not admin_auth.scope_allows(
+            grant,
+            resource,
+            write=admin_auth.write_method(request.method),
+            root_only=root_only or resource_root_only,
+        ):
+            raise GatewayError(
+                403,
+                "forbidden",
+                "this admin token does not allow %s %s" % (request.method, request.url.path),
+            )
 
     def contact_ids_from(body: Mapping[str, Any], session_required: bool = True) -> List[int]:
         """Resolve `contact_ids` / `all_contacts` into a list of follower ids."""
@@ -3457,6 +3561,17 @@ def create_app(config: Optional[Config] = None, *, gateway: Optional[Gateway] = 
             {"ok": False, "error": "client_rule", "rule": exc.rule, "detail": exc.detail}, status_code=400
         )
 
+    @app.exception_handler(VaultError)
+    async def _vault_error(_request: Request, exc: VaultError) -> JSONResponse:
+        # A sealed value that does not open is an operator problem (wrong or
+        # missing POPOPX_VAULT_KEY, or a ciphertext moved between rows), not a
+        # client one. 503 is honest: the request may succeed after the key is
+        # fixed, and the detail names the table/column/subject only.
+        LOG.error("vault error: %s", exc)
+        return JSONResponse(
+            {"ok": False, "error": "vault_error", "detail": str(exc)}, status_code=503
+        )
+
     @app.exception_handler(sqlite3.Error)
     async def _sqlite_error(_request: Request, exc: sqlite3.Error) -> JSONResponse:
         LOG.exception("database error")
@@ -3465,14 +3580,69 @@ def create_app(config: Optional[Config] = None, *, gateway: Optional[Gateway] = 
     # ── auth ────────────────────────────────────────────────────────────────
 
     @app.middleware("http")
-    async def plugin_auth(request: Request, call_next: Any) -> Any:
+    async def admin_gate(request: Request, call_next: Any) -> Any:
+        """Resolve one admin credential per request and enforce its scopes.
+
+        Plugin paths keep their pre-existing contract: no credential is 401
+        before the plugin gate can answer 404. Core paths are annotated here and
+        still refused by ``admin_required`` in the handler, so the documented
+        error body and the AST census stay in one place. A valid scoped token is
+        audited on the way out; the root token deliberately is not, because it is
+        the operator's everyday credential and auditing every console poll would
+        bury the scoped decisions this table exists to show.
+        """
         path = request.url.path
-        if path.startswith("/api/v1/plugins/") and not path.endswith(PUBLIC_PLUGIN_SUFFIXES) \
-                and not plugin_route_is_public(request.method, path):
-            presented = request.headers.get("x-admin-token") or request.query_params.get("token")
-            if not token_is_valid(presented, gw.config.admin_token):
-                return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
-        return await call_next(request)
+        public_plugin = path.startswith("/api/v1/plugins/") and (
+            path.endswith(PUBLIC_PLUGIN_SUFFIXES) or plugin_route_is_public(request.method, path)
+        )
+        plugin_path = path.startswith("/api/v1/plugins/") and not public_plugin
+        core_path = (
+            path.startswith("/api/v1/")
+            and not public_plugin
+            and (str(request.method).upper(), path) not in PUBLIC_ROUTE_KEYS
+        )
+        if not plugin_path and not core_path:
+            return await call_next(request)
+        presented = admin_auth.presented_credential(
+            request.headers, request.query_params.get("token") or ""
+        )
+        grant, rejected = admin_auth.resolve_presented(
+            gw.db, presented, gw.config.admin_token, path=path
+        )
+        if grant is None:
+            if plugin_path:
+                body: Dict[str, Any] = {"ok": False, "error": "unauthorized"}
+                if rejected:
+                    body["detail"] = "this admin token is %s" % rejected.get("reason")
+                return JSONResponse(body, status_code=401)
+            if rejected:
+                # A known-but-dead token should not reach `admin_required`, which
+                # would resolve it a second time and write the same audit row twice.
+                return JSONResponse(
+                    {"ok": False, "error": "unauthorized",
+                     "detail": "this admin token is %s" % rejected.get("reason")},
+                    status_code=401,
+                )
+            return await call_next(request)
+        setattr(request.state, admin_auth.STATE_ATTR, grant)
+        resource, root_only = admin_auth.resource_for_path(path, ADMIN_PLUGIN_PREFIXES)
+        if not admin_auth.scope_allows(
+            grant, resource, write=admin_auth.write_method(request.method), root_only=root_only
+        ):
+            admin_auth.record_audit(
+                gw.db, grant.get("token_id"), "request", path, "scope_denied", 403
+            )
+            return JSONResponse(
+                {"ok": False, "error": "forbidden",
+                 "detail": "this admin token does not allow %s %s" % (request.method, path)},
+                status_code=403,
+            )
+        response = await call_next(request)
+        if not grant.get("root"):
+            admin_auth.record_audit(
+                gw.db, grant.get("token_id"), "request", path, "used", response.status_code
+            )
+        return response
 
     # ── public surface ──────────────────────────────────────────────────────
 
@@ -3600,6 +3770,53 @@ def create_app(config: Optional[Config] = None, *, gateway: Optional[Gateway] = 
     async def status(request: Request) -> Dict[str, Any]:
         admin_required(request)
         return gw.status()
+
+    # ── scoped admin tokens ─────────────────────────────────────────────────
+    # Root-only by construction: the mint route is the one place a new credential
+    # is created, and `core:admin` is not a grantable scope, so a leaked scoped
+    # token cannot climb. The plaintext is in the mint response and nowhere else.
+
+    @app.get("/api/v1/admin/tokens")
+    async def admin_tokens_list(request: Request) -> Dict[str, Any]:
+        admin_required(request, root_only=True)
+        return {"ok": True, "tokens": admin_auth.list_tokens(gw.db)}
+
+    @app.post("/api/v1/admin/tokens")
+    async def admin_tokens_mint(request: Request) -> Dict[str, Any]:
+        admin_required(request, root_only=True)
+        body = await json_body(request)
+        days = int_or_none(body.get("expires_in_days"))
+        if days is not None and (days < 1 or days > 3650):
+            raise bad_request("expires_in_days_out_of_range", "expires_in_days must be between 1 and 3650")
+        expires_at = now_ms() + days * 86_400_000 if days is not None else None
+        try:
+            minted = admin_auth.mint_token(
+                gw.db, str(body.get("label") or ""), body.get("scopes"), expires_at_ms=expires_at
+            )
+        except ValueError as exc:
+            raise bad_request("invalid_token_request", str(exc)) from exc
+        return minted
+
+    @app.get("/api/v1/admin/tokens/audit")
+    async def admin_tokens_audit(request: Request) -> Dict[str, Any]:
+        admin_required(request, root_only=True)
+        raw_limit = request.query_params.get("limit") if request.query_params else None
+        try:
+            limit = int(raw_limit) if raw_limit not in (None, "") else 50
+        except (TypeError, ValueError):
+            raise bad_request("invalid_limit", "limit must be an integer")
+        if limit < 1 or limit > 500:
+            raise bad_request("invalid_limit", "limit must be between 1 and 500")
+        return {"ok": True, "audit": admin_auth.list_audit(gw.db, limit=limit)}
+
+    @app.delete("/api/v1/admin/tokens/{token_id}")
+    async def admin_tokens_revoke(token_id: str, request: Request) -> Dict[str, Any]:
+        admin_required(request, root_only=True)
+        row = gw.db.query_one("SELECT id FROM admin_tokens WHERE id = ?", (token_id,))
+        if row is None:
+            raise not_found("token_not_found", "no scoped admin token with that id")
+        changed = admin_auth.revoke_token(gw.db, token_id)
+        return {"ok": True, "id": token_id, "revoked": changed}
 
     @app.post("/api/v1/node/address")
     async def node_address(request: Request) -> Dict[str, Any]:
@@ -4801,7 +5018,7 @@ def oracle_agreement_checks(
 def _declared_router_prefix(tree: ast.AST, module: Any, spec: Any) -> Optional[str]:
     """Resolve the `prefix=` of the `APIRouter(...)` inside one `create_router`.
 
-    Three spellings exist across the eight plugins and all three mean the mount table's
+    Three spellings exist across the nine plugins and all three mean the mount table's
     value: a literal (`ai_agent_plugin.py:URL_PREFIX`), `deps.spec.url_prefix`, and
     `_router_prefix(deps)`, which returns `spec.url_prefix` for its own plugin id. A
     prefix this function cannot evaluate returns `None`, because guessing here would
@@ -5187,7 +5404,7 @@ def self_test() -> List[str]:
           and mount_prefix("/api/v1/plugins/alerts/", "/api/v1/plugins/alerts") == "")
     # The other half of the same rule, and the control that keeps the check above
     # from passing because it matches everything: a router that carries nothing is
-    # still put under the mount table's prefix, or two of the eight plugins would be
+    # still put under the mount table's prefix, or two of the nine plugins would be
     # served at bare `/status` and `/sessions`.
     check("mount_prefix_still_prefixes_a_bare_router",
           mount_prefix("", "/api/v1/plugins/ai") == "/api/v1/plugins/ai"
@@ -6056,14 +6273,17 @@ def http_self_test() -> List[str]:
                 ("POPOPX_NODE_WS_URL", "ws://127.0.0.1:1"),
                 ("POPOPX_OFFICIAL_ED25519_PUBLIC_KEY", issuer_pub),
                 ("POPOPX_BILLING_REQUIRE_VOUCHER", "1"),
-                # All eight, so the sweep below cannot pass by quietly covering fewer
-                # routes than the suite declares: `web3_bridge` and the three connectors
-                # are off by default (config.py) and their GETs vanish from the app
-                # without a word.
+                ("POPOPX_ALERT_WEBHOOK_TOKEN", "http-selftest-alert-token-0123456789"),
+                ("POPOPX_ALERT_WEBHOOK_SECRET", "http-selftest-alert-secret-0123456789"),
+                # All nine, so the sweep below cannot pass by quietly covering fewer
+                # routes than the suite declares: `web3_bridge`, the three connectors and
+                # the Slack/Discord bridge are off by default (config.py) and their GETs
+                # vanish from the app without a word.
                 ("POPOPX_PLUGIN_WEB3_BRIDGE", "1"),
                 ("POPOPX_PLUGIN_WORKFLOW_WEBHOOK", "1"),
                 ("POPOPX_PLUGIN_CARDDAV_CONNECTOR", "1"),
                 ("POPOPX_PLUGIN_CALDAV_CONNECTOR", "1"),
+                ("POPOPX_PLUGIN_SLACK_DISCORD", "1"),
             ]
         ),
         encoding="utf-8",
@@ -6233,6 +6453,82 @@ def http_self_test() -> List[str]:
 
         refused = client.get("/api/v1/vouchers")
         check("an_admin_read_without_the_token_is_refused", refused.status_code == 401)
+
+        # Scoped admin tokens: mint with the root, then prove the three decisions
+        # the approval rules out — a read scope cannot write, a core scope cannot
+        # reach a plugin, and no scoped token can manage tokens. Revocation has to
+        # take effect on the next request, not on the next process start.
+        minted_scoped = client.post(
+            "/api/v1/admin/tokens",
+            json={"label": "http self-test status reader", "scopes": ["core:status:ro"]},
+            headers=headers,
+        )
+        scoped_body = minted_scoped.json() if minted_scoped.status_code == 200 else {}
+        scoped_token = str(scoped_body.get("token") or "")
+        scoped_id = str(scoped_body.get("id") or "")
+        check("the_root_token_mints_a_scoped_token",
+              minted_scoped.status_code == 200 and scoped_token.startswith(admin_auth.TOKEN_PREFIX)
+              and scoped_body.get("scopes") == ["core:status:ro"] and scoped_id.startswith("atk_"))
+        scoped_headers = {"x-admin-token": scoped_token}
+        check("a_scoped_read_token_reads_its_resource",
+              client.get("/api/v1/status", headers=scoped_headers).status_code == 200)
+        read_write = client.post("/api/v1/vouchers/redeem", json={}, headers=scoped_headers)
+        check("a_read_only_scope_refuses_a_write",
+              read_write.status_code == 403 and read_write.json().get("error") == "forbidden")
+        root_only = client.get("/api/v1/admin/tokens", headers=scoped_headers)
+        check("a_scoped_token_cannot_manage_tokens", root_only.status_code == 403)
+        plugin_denied = client.get("/api/v1/plugins/slackdiscord/status", headers=scoped_headers)
+        check("a_core_scope_does_not_reach_a_plugin", plugin_denied.status_code == 403)
+
+        minted_plugin = client.post(
+            "/api/v1/admin/tokens",
+            json={"label": "http self-test slack reader", "scopes": ["plugin:slack_discord:ro"]},
+            headers=headers,
+        )
+        plugin_token = str((minted_plugin.json() if minted_plugin.status_code == 200 else {}).get("token") or "")
+        plugin_headers = {"x-admin-token": plugin_token}
+        check("a_plugin_scope_reads_its_plugin_console",
+              client.get("/api/v1/plugins/slackdiscord/status", headers=plugin_headers).status_code == 200)
+        plugin_write = client.post(
+            "/api/v1/plugins/slackdiscord/send",
+            json={"workspace_id": "sdw_missing", "text": "nope"}, headers=plugin_headers,
+        )
+        check("a_plugin_read_scope_refuses_a_plugin_write", plugin_write.status_code == 403)
+        cross_plugin = client.get("/api/v1/plugins/sso/status", headers=plugin_headers)
+        check("a_plugin_scope_does_not_reach_another_plugin", cross_plugin.status_code == 403)
+
+        listed = client.get("/api/v1/admin/tokens", headers=headers)
+        listed_text = listed.text
+        check("the_root_can_list_scoped_tokens_without_their_secrets",
+              listed.status_code == 200 and scoped_id in listed_text
+              and scoped_token not in listed_text and admin_auth.token_hash(scoped_token) not in listed_text)
+        bad_scope = client.post(
+            "/api/v1/admin/tokens", json={"label": "bad", "scopes": ["core:admin:rw"]}, headers=headers
+        )
+        bad_expiry = client.post(
+            "/api/v1/admin/tokens", json={"label": "bad", "scopes": ["core:status:ro"], "expires_in_days": 0},
+            headers=headers,
+        )
+        check("token_minting_rejects_a_root_only_scope_and_a_past_expiry",
+              bad_scope.status_code == 400 and bad_expiry.status_code == 400)
+
+        revoked = client.delete("/api/v1/admin/tokens/" + scoped_id, headers=headers)
+        check("the_root_can_revoke_a_scoped_token", revoked.status_code == 200 and revoked.json().get("revoked") is True)
+        after_revoke = client.get("/api/v1/status", headers=scoped_headers)
+        check("a_revoked_token_stops_working_on_the_next_request", after_revoke.status_code == 401)
+        token_audit = client.get("/api/v1/admin/tokens/audit?limit=200", headers=headers)
+        audit_body = token_audit.json() if token_audit.status_code == 200 else {}
+        audit_text = token_audit.text
+        audit_rows = audit_body.get("audit") or []
+        check("scoped_requests_are_audited",
+              token_audit.status_code == 200
+              and any(row.get("outcome") == "scope_denied" for row in audit_rows)
+              and any(row.get("outcome") == "used" for row in audit_rows)
+              and any(row.get("outcome") == "revoked" for row in audit_rows))
+        check("the_audit_list_carries_no_token_or_secret",
+              scoped_token not in audit_text and plugin_token not in audit_text
+              and admin_auth.token_hash(scoped_token) not in audit_text)
+
         served = client.get("/")
         check("the_console_is_served_at_the_root",
               served.status_code == 200 and "text/html" in served.headers.get("content-type", ""))
@@ -6264,7 +6560,48 @@ def http_self_test() -> List[str]:
               client.post("/api/v1/verifyH5Auth", json={"popopx_uid": "u_x", "ts": "1", "sig": "y"}).status_code
               in (200, 400, 401))
 
-        # The eight consoles. Each panel fetches `<url_prefix>/status`, and a plugin
+        # The signed alert webhook: with a secret configured, the shared token alone
+        # is not enough, and the same bytes cannot be accepted twice. The empty
+        # `alerts` array keeps the ingest path quiet while still exercising the
+        # signature gate, which is the part this check exists for.
+        alert_token = "http-selftest-alert-token-0123456789"
+        alert_secret = "http-selftest-alert-secret-0123456789"
+        alert_raw = b'{"status":"firing","alerts":[]}'
+        alert_ts = int(time.time())
+        alert_sig = "v1=" + hmac.new(
+            alert_secret.encode("utf-8"), b"%d." % alert_ts + alert_raw, hashlib.sha256
+        ).hexdigest()
+        alert_headers = {"X-Popopx-Alert-Token": alert_token}
+        unsigned_alert = client.post(
+            "/api/v1/plugins/alerts/webhook", content=alert_raw, headers=alert_headers
+        )
+        check("a_webhook_without_its_signature_is_refused_when_a_secret_is_set",
+              unsigned_alert.status_code == 401)
+        signed_alert = client.post(
+            "/api/v1/plugins/alerts/webhook", content=alert_raw,
+            headers=dict(alert_headers, **{"X-Popopx-Timestamp": str(alert_ts),
+                                          "X-Popopx-Signature": alert_sig}),
+        )
+        check("a_correctly_signed_webhook_is_accepted",
+              signed_alert.status_code == 200 and signed_alert.json().get("ok") is True)
+        replayed_alert = client.post(
+            "/api/v1/plugins/alerts/webhook", content=alert_raw,
+            headers=dict(alert_headers, **{"X-Popopx-Timestamp": str(alert_ts),
+                                          "X-Popopx-Signature": alert_sig}),
+        )
+        check("a_replayed_signed_webhook_is_refused", replayed_alert.status_code == 401)
+        stale_ts = alert_ts - 301
+        stale_sig = "v1=" + hmac.new(
+            alert_secret.encode("utf-8"), b"%d." % stale_ts + alert_raw, hashlib.sha256
+        ).hexdigest()
+        stale_alert = client.post(
+            "/api/v1/plugins/alerts/webhook", content=alert_raw,
+            headers=dict(alert_headers, **{"X-Popopx-Timestamp": str(stale_ts),
+                                          "X-Popopx-Signature": stale_sig}),
+        )
+        check("a_signed_webhook_outside_the_window_is_refused", stale_alert.status_code == 401)
+
+        # The nine consoles. Each panel fetches `<url_prefix>/status`, and a plugin
         # router mounted first means its own wildcard (`/{alert_id}`, `/{poll_id}`)
         # answers that path first too — so this is the check that a panel is reachable,
         # not merely that a status route exists somewhere on the gateway. The header is
@@ -6501,6 +6838,8 @@ def http_self_test() -> List[str]:
 SELF_TEST_MODULES: Tuple[str, ...] = (
     "app.database",
     "app.config",
+    "app.admin_auth",
+    "app.vault",
     "app.crypto_service",
     "app.billing_service",
     "app.agent_bridge",
@@ -6514,6 +6853,7 @@ SELF_TEST_MODULES: Tuple[str, ...] = (
     "app.plugins.workflow_webhook_plugin",
     "app.plugins.carddav_connector",
     "app.plugins.caldav_connector",
+    "app.plugins.slack_discord_plugin",
 )
 
 
@@ -6684,7 +7024,39 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--self-test", action="store_true", help="run the protocol suite (no wheels, no node, no config) and exit")
     parser.add_argument("--check-routes", action="store_true", help="verify every admin route is token-guarded, then exit")
     parser.add_argument("--print-routes", action="store_true", help="print the route table and exit")
+    parser.add_argument("--migrate-secrets", action="store_true", help="seal every plaintext secret with POPOPX_VAULT_KEY and exit")
     args = parser.parse_args(argv)
+
+    if args.migrate_secrets:
+        from app.vault import migrate_secrets
+
+        try:
+            config = load_config(Path(args.env)) if args.env else load_config()
+        except ConfigError as exc:
+            sys.stderr.write("POPOPX gateway cannot start: %s\n" % exc)
+            return 3
+        if not config.vault_key:
+            sys.stderr.write(
+                "--migrate-secrets needs POPOPX_VAULT_KEY set to a 32-byte key; "
+                "generate one with: openssl rand -hex 32\n"
+            )
+            return 3
+        database = Database(config.db_path)
+        try:
+            report = migrate_secrets(database, SecretBox(config.vault_key))
+        except VaultError as exc:
+            sys.stderr.write("migration refused: %s\n" % exc)
+            return 1
+        for row in report["tables"]:
+            sys.stdout.write(
+                "%-24s %-22s sealed=%-4d already-sealed-or-empty=%-4d errors=%d\n"
+                % (row["table"], row["column"], row["sealed"], row["skipped"], row["errors"])
+            )
+        sys.stdout.write(
+            "secrets: %d sealed, %d already sealed or empty, %d errors\n"
+            % (report["sealed"], report["skipped"], report["errors"])
+        )
+        return 0 if report["errors"] == 0 else 1
 
     if args.self_test:
         logging.basicConfig(level=logging.ERROR, format="%(levelname)s %(name)s: %(message)s")

@@ -173,6 +173,7 @@ METER_ACTIONS: Tuple[Tuple[str, str], ...] = (
     ("workflow_event", "per_workflow_event"),
     ("carddav_query", "per_carddav_query"),
     ("caldav_query", "per_caldav_query"),
+    ("slack_discord_event", "per_slack_discord_event"),
 )
 
 #: Which plugin toggle each meter pays for. The first three meters in
@@ -189,6 +190,7 @@ METERED_PLUGINS: Tuple[Tuple[str, str], ...] = (
     ("workflow_webhook", "workflow_event"),
     ("carddav_connector", "carddav_query"),
     ("caldav_connector", "caldav_query"),
+    ("slack_discord", "slack_discord_event"),
 )
 
 #: Hard cap on :meth:`BillingService.ledger`; the console renders a page, and a
@@ -1677,7 +1679,7 @@ def self_test() -> List[str]:
 
         # ── meters ───────────────────────────────────────────────────────────
         prices = svc.meters()
-        check("the_meter_table_is_the_eleven_named_actions", set(prices) == {action for action, _ in METER_ACTIONS})
+        check("the_meter_table_is_the_twelve_named_actions", set(prices) == {action for action, _ in METER_ACTIONS})
         check("meters_come_from_the_config_not_a_literal", prices["card"] == svc.config.billing.per_card)
         for action, attr in METER_ACTIONS:
             probe = new_config(meters={action: 3}, name="probe")
@@ -1692,7 +1694,7 @@ def self_test() -> List[str]:
         check("a_free_action_is_still_recorded", priced.db.scalar("SELECT COUNT(*) FROM billing_ledger WHERE kind = 'consume' AND amount = 0") == 1)
         check("a_free_action_moves_no_money", free.charged == 0 and free.balance_after == 100)
         check("a_free_action_appears_in_the_console_as_free", "alert" in priced.summary()["free_meters"])
-        check("the_plugin_meters_are_exactly_eight", len(priced.summary()["plugin_meters"]) == len(METERED_PLUGINS) == 8)
+        check("the_plugin_meters_are_exactly_nine", len(priced.summary()["plugin_meters"]) == len(METERED_PLUGINS) == 9)
         afford, _ = new_service(new_config(threshold=5, name="afford"), name="afford")
         activate(afford, 7)
         check("an_account_with_room_can_afford", afford.can_afford("card") is True)

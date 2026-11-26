@@ -256,6 +256,7 @@ class PluginToggles:
     workflow_webhook: bool = False
     carddav_connector: bool = False
     caldav_connector: bool = False
+    slack_discord: bool = False
 
     @property
     def enabled(self) -> List[str]:
@@ -270,6 +271,7 @@ class PluginToggles:
                 ("workflow_webhook", self.workflow_webhook),
                 ("carddav_connector", self.carddav_connector),
                 ("caldav_connector", self.caldav_connector),
+                ("slack_discord", self.slack_discord),
             )
             if on
         ]
@@ -308,6 +310,7 @@ class BillingConfig:
     per_workflow_event: int = 1
     per_carddav_query: int = 1
     per_caldav_query: int = 1
+    per_slack_discord_event: int = 1
 
 
 @dataclass
@@ -322,6 +325,7 @@ class Config:
     service_name: str
     service_full_name: str
     service_id: str
+    vault_key: str
     billing: BillingConfig
     plugins: PluginToggles
     ai_base_url: str
@@ -333,6 +337,7 @@ class Config:
     ai_rate_limit_messages: int
     ai_rate_limit_window_seconds: int
     alert_webhook_token: str
+    alert_webhook_secret: str
     alert_min_severity: str
     alert_resolve_keywords: List[str]
     sso_ttl_seconds: int
@@ -441,6 +446,7 @@ def load_config(env_path: Optional[Path] = None) -> Config:
         per_workflow_event=_as_int(source, _CP_KEYS["workflow"], 1, minimum=0),
         per_carddav_query=_as_int(source, _CP_KEYS["carddav"], 1, minimum=0),
         per_caldav_query=_as_int(source, _CP_KEYS["caldav"], 1, minimum=0),
+        per_slack_discord_event=_as_int(source, _CP_KEYS["slack_discord"], 1, minimum=0),
     )
     if billing.require_voucher and billing.official_ed25519_public_key is None:
         raise ConfigError(
@@ -458,6 +464,7 @@ def load_config(env_path: Optional[Path] = None) -> Config:
         workflow_webhook=_as_bool(source, _ENV_PREFIX + "PLUGIN_WORKFLOW_WEBHOOK", False),
         carddav_connector=_as_bool(source, _ENV_PREFIX + "PLUGIN_CARDDAV_CONNECTOR", False),
         caldav_connector=_as_bool(source, _ENV_PREFIX + "PLUGIN_CALDAV_CONNECTOR", False),
+        slack_discord=_as_bool(source, _ENV_PREFIX + "PLUGIN_SLACK_DISCORD", False),
     )
 
     alert_min_severity = _as_str(source, _ENV_PREFIX + "ALERT_MIN_SEVERITY", "warning").lower()
@@ -466,6 +473,15 @@ def load_config(env_path: Optional[Path] = None) -> Config:
 
     keywords = _as_str(source, _ENV_PREFIX + "ALERT_RESOLVE_KEYWORDS", "确认,已处理,ack,resolve")
     resolve_keywords = [k.strip().lower() for k in keywords.split(",") if k.strip()]
+
+    vault_key = _as_str(source, _ENV_PREFIX + "VAULT_KEY")
+    if vault_key:
+        from app.vault import parse_vault_key
+
+        try:
+            parse_vault_key(vault_key)
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from None
 
     config = Config(
         node=NodeConfig(
@@ -484,6 +500,7 @@ def load_config(env_path: Optional[Path] = None) -> Config:
         service_name=_as_str(source, _ENV_PREFIX + "SERVICE_NAME", "POPOPX 服务号"),
         service_full_name=_as_str(source, _ENV_PREFIX + "SERVICE_FULL_NAME", "POPOPX Service Account"),
         service_id=_as_str(source, _ENV_PREFIX + "SERVICE_ID", "popopx.official"),
+        vault_key=vault_key,
         billing=billing,
         plugins=plugins,
         ai_base_url=_as_url(source, _ENV_PREFIX + "AI_BASE_URL", "https://api.openai.com/v1", ["http", "https"]),
@@ -499,6 +516,7 @@ def load_config(env_path: Optional[Path] = None) -> Config:
         ai_rate_limit_messages=_as_int(source, _ENV_PREFIX + "AI_RATE_LIMIT_MESSAGES", 20, minimum=1),
         ai_rate_limit_window_seconds=_as_int(source, _ENV_PREFIX + "AI_RATE_LIMIT_WINDOW_SECONDS", 300, minimum=1),
         alert_webhook_token=_as_str(source, _ENV_PREFIX + "ALERT_WEBHOOK_TOKEN"),
+        alert_webhook_secret=_as_str(source, _ENV_PREFIX + "ALERT_WEBHOOK_SECRET"),
         alert_min_severity=alert_min_severity,
         alert_resolve_keywords=resolve_keywords,
         sso_ttl_seconds=_as_int(source, _ENV_PREFIX + "SSO_TTL_SECONDS", 180, minimum=15, maximum=3600),
@@ -544,6 +562,7 @@ _CP_KEYS = {
     "workflow": _ENV_PREFIX + "CP_PER_WORKFLOW_EVENT",
     "carddav": _ENV_PREFIX + "CP_PER_CARDDAV_QUERY",
     "caldav": _ENV_PREFIX + "CP_PER_CALDAV_QUERY",
+    "slack_discord": _ENV_PREFIX + "CP_PER_SLACK_DISCORD_EVENT",
 }
 
 
@@ -729,6 +748,22 @@ def self_test() -> List[str]:
     check("the_h5_origin_never_keeps_a_trailing_slash", load({"POPOPX_PUBLIC_BASE_URL": "https://eco.example.test/"}).h5_origin == "https://eco.example.test")
     check("the_h5_server_secret_is_stripped_not_resized", load({"POPOPX_H5_SERVER_SECRET": "  s3cret  "}).h5_server_secret == "s3cret")
 
+    # ── 2b. the vault key: optional, but never a half-valid one ─────────────
+    check("the_vault_is_off_by_default", load({"POPOPX_VAULT_KEY": None}).vault_key == "")
+    check("a_hex_vault_key_is_accepted", load({"POPOPX_VAULT_KEY": key_bytes.hex()}).vault_key == key_bytes.hex())
+    check("a_base64_vault_key_is_accepted", load({"POPOPX_VAULT_KEY": pub_b64}).vault_key == pub_b64)
+    for name, bad in (
+        ("a_short_vault_key_is_refused", "abcd"),
+        ("a_vault_key_that_is_neither_base64_nor_hex_is_refused", "not-a-key!!!"),
+        ("a_vault_key_of_the_wrong_length_names_the_rule", base64.b64encode(bytes(range(33))).decode("ascii")),
+    ):
+        try:
+            load({"POPOPX_VAULT_KEY": bad})
+            check(name, False)
+        except ConfigError as exc:
+            check(name, "POPOPX_VAULT_KEY" in str(exc) and ("32 bytes" in str(exc) or "neither valid" in str(exc)))
+    check("the_alert_webhook_signature_secret_is_optional", load({"POPOPX_ALERT_WEBHOOK_SECRET": None}).alert_webhook_secret == "")
+
     banner = clean.redacted_summary()
     check("the_boot_banner_carries_no_admin_token", clean.admin_token not in banner)
     check("the_boot_banner_carries_no_server_secret", clean.h5_server_secret not in banner)
@@ -826,11 +861,11 @@ def self_test() -> List[str]:
     toggles = load({"POPOPX_PLUGIN_WEB3_BRIDGE": "1"})
     check("web3_bridge_is_off_until_an_operator_turns_it_on", three_lines.plugins.web3_bridge is False and toggles.plugins.web3_bridge is True)
     check("the_enabled_list_is_the_on_ones_in_declaration_order", three_lines.plugins.enabled == ["ai_agent", "alert_ops", "privacy_sso", "polls"])
-    check("the_three_connectors_start_off", not (three_lines.plugins.workflow_webhook or three_lines.plugins.carddav_connector or three_lines.plugins.caldav_connector))
-    for plugin in ("ai_agent", "alert_ops", "privacy_sso", "polls", "web3_bridge", "workflow_webhook", "carddav_connector", "caldav_connector"):
+    check("the_four_opt_in_plugins_start_off", not (three_lines.plugins.workflow_webhook or three_lines.plugins.carddav_connector or three_lines.plugins.caldav_connector or three_lines.plugins.slack_discord))
+    for plugin in ("ai_agent", "alert_ops", "privacy_sso", "polls", "web3_bridge", "workflow_webhook", "carddav_connector", "caldav_connector", "slack_discord"):
         name = "switching_off_%s_removes_it_from_the_enabled_list" % plugin
         check(name, plugin not in load({"POPOPX_PLUGIN_" + plugin.upper(): "0"}).plugins.enabled)
-    check("every_plugin_toggle_is_a_named_field", {f.name for f in dataclasses.fields(PluginToggles)} == {"ai_agent", "alert_ops", "privacy_sso", "polls", "web3_bridge", "workflow_webhook", "carddav_connector", "caldav_connector"})
+    check("every_plugin_toggle_is_a_named_field", {f.name for f in dataclasses.fields(PluginToggles)} == {"ai_agent", "alert_ops", "privacy_sso", "polls", "web3_bridge", "workflow_webhook", "carddav_connector", "caldav_connector", "slack_discord"})
 
     # ── 8. vocabularies, keywords and the bounds a typo would breach ────────
     check("alert_min_severity_is_case_insensitive", load({"POPOPX_ALERT_MIN_SEVERITY": "CRITICAL"}).alert_min_severity == "critical")
@@ -864,7 +899,7 @@ def self_test() -> List[str]:
     check("the_service_identity_defaults_are_the_paired_account", three_lines.service_name == "POPOPX 服务号" and three_lines.service_full_name == "POPOPX Service Account" and three_lines.service_id == "popopx.official")
     check("the_ai_defaults_are_a_hosted_model_and_a_restraint", three_lines.ai_model == "gpt-4o-mini" and three_lines.ai_max_tokens == 512 and "不索要任何个人身份信息" in three_lines.ai_system_prompt)
     check("the_public_rpc_defaults_are_two_chain_endpoints", three_lines.web3_evm_rpc_url == "https://eth.llamarpc.com" and three_lines.web3_solana_rpc_url == "https://api.mainnet-beta.solana.com")
-    check("the_meter_defaults_match_the_published_price_list", [three_lines.billing.per_card, three_lines.billing.per_menu_push, three_lines.billing.per_key_rotation, three_lines.billing.per_ai_message, three_lines.billing.per_alert, three_lines.billing.per_sso_login, three_lines.billing.per_poll, three_lines.billing.per_web3_event, three_lines.billing.per_workflow_event, three_lines.billing.per_carddav_query, three_lines.billing.per_caldav_query] == [1, 1, 2, 5, 2, 1, 1, 1, 1, 1, 1])
+    check("the_meter_defaults_match_the_published_price_list", [three_lines.billing.per_card, three_lines.billing.per_menu_push, three_lines.billing.per_key_rotation, three_lines.billing.per_ai_message, three_lines.billing.per_alert, three_lines.billing.per_sso_login, three_lines.billing.per_poll, three_lines.billing.per_web3_event, three_lines.billing.per_workflow_event, three_lines.billing.per_carddav_query, three_lines.billing.per_caldav_query, three_lines.billing.per_slack_discord_event] == [1, 1, 2, 5, 2, 1, 1, 1, 1, 1, 1, 1])
     check("sso_defaults_are_a_three_minute_login", three_lines.sso_ttl_seconds == 180 and three_lines.sso_poll_interval_ms == 2000)
 
     # ── 10. warnings: the settings that run, but not as the operator means ──

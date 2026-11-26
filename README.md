@@ -6,13 +6,14 @@
 
 中文 · English：[`README.en.md`](README.en.md)
 
-POPOPX 服务号的后端套件：网关（FastAPI）、计费（POPX-CP）、频道信封加密、八个业务插件，
+POPOPX 服务号的后端套件：网关（FastAPI）、计费（POPX-CP）、频道信封加密、九个业务插件，
 以及一个浏览器管理后台。协议与随包的 POPOPX iOS 客户端逐字节对齐；开源节点只通过
 `ws://127.0.0.1:5225` 连接，本套件不链接、不修改、也不重新分发它的任何代码。
 
-其中三个连接器面向自建办公栈：`workflow_webhook` 把事件以 HMAC-SHA256 签名推给
+其中四个连接器面向自建办公栈：`workflow_webhook` 把事件以 HMAC-SHA256 签名推给
 Node-RED / Activepieces，并把入站动作强制转成人工确认卡片；`carddav_connector` 与
-`caldav_connector` 只按关键词/时间窗现场查询，返回前剥离私密联系字段与会议标题。
+`caldav_connector` 只按关键词/时间窗现场查询，返回前剥离私密联系字段与会议标题；
+`slack_discord` 把一个工作区的入站 webhook 作为独立的出站通道，逐工作区保存密钥并按次计费。
 
 ## 协议与商标
 
@@ -43,9 +44,11 @@ popopx-service-suite/
 └── gateway/
     ├── Dockerfile
     ├── requirements.txt     fastapi / uvicorn / pydantic / cryptography / httpx / qrcode / websockets
-    └── app/                 config database billing_service crypto_service agent_bridge main
+    ├── requirements-dev.txt 同一批运行时依赖 + pytest（测试适配器用，生产启动器不读）
+    ├── tests/               pytest 适配器：调用各模块 self_test()，不复制断言
+    └── app/                 config database admin_auth vault billing_service crypto_service agent_bridge main
         ├── plugins/         ai_agent alert_ops privacy_sso polls web3_bridge
-        │                    workflow_webhook carddav_connector caldav_connector
+        │                    workflow_webhook carddav_connector caldav_connector slack_discord
         └── static/          index.html 管理后台
 ```
 
@@ -56,8 +59,8 @@ popopx-service-suite/
 - 起服务要 Python 3.11 加 `gateway/requirements.txt` 里的 wheel。没装这些 wheel 的机器上并
   没有「降级 HTTP 路径」这回事：`create_app()` 直接抛 `RuntimeError: FastAPI is not installed;
   run ./start_macos.sh, ./install_macos.sh or ./install_ubuntu22.sh first`（后面拼 `ImportError` 原文，见
-  `gateway/app/main.py:3109`）。这种机器能做的是跑 19 组自检里的 16 组——运行器会把依赖那两个
-  wheel 的组点名 `SKIPPED`。下面「自检」里的 **2514 条 / 16 组** 就是这么来的，它不是一台正在
+  `gateway/app/main.py:3385`）。这种机器能做的是跑 22 组自检里的 19 组——运行器会把依赖那两个
+  wheel 的组点名 `SKIPPED`。下面「自检」里的 **2637 条 / 19 组** 就是这么来的，它不是一台正在
   应答的网关。
 - 需要一个正在运行的 `popopx-agent` / `popopx-chat` 节点，它的 WebSocket 控制口在
   `127.0.0.1:5225`。没有节点也能起服务，见下面「启动行为与插件开关」。
@@ -150,7 +153,7 @@ Crashed=true}`、`RestartSec=3`→`ThrottleInterval=3`（那是最短间隔的�
 本机离线实测到的：`--help`、`--check`、`--dry-run`（含 `--with-node`）全部退出 0，两个 plist
 `plutil -lint` 通过，dry-run 里"已存在的 env 逐字节不变、只多一个 `.bak.<utc>`"这条由 cksum 现场
 证明；`brew` 装的 Python 3.11.18 过了版本门，用它按 `gateway/requirements.txt` 实装依赖建一个 venv，
-`--self-test` 实测 **2619 条 / 19 组、exit 0**（这一跑顺手揪出一个只在新版 starlette 上失明的 HTTP
+`--self-test` 实测 **2776 条 / 22 组、exit 0**（这一跑顺手揪出一个只在新版 starlette 上失明的 HTTP
 量具，见「自检」）。
 
 带 sudo 的真装真起 **2026-11-22 在这台 Mac 上跑过了**：`/Library/LaunchDaemons/com.popopx.gateway.plist`
@@ -234,11 +237,11 @@ NEXT STEPS：把 `POPOPX_PUBLIC_BASE_URL` 设成手机真正加载的那个 http
 节点在启动那一刻没起来不是致命错误：网关照常开始服务，`/healthz` 报
 `node_connected: false`，桥接层按封顶的退避一直重试，节点起来后自己接上（`strict=True`
 留给需要 fail-fast 的调用方）。`ai_agent`、`alert_ops`、`privacy_sso`、`polls` 默认开启；
-`web3_bridge` 与三个连接器（`workflow_webhook`、`carddav_connector`、`caldav_connector`）
-默认关闭，各自跟着自己的 `POPOPX_PLUGIN_*` 打开。三个连接器还要求先在控制台配置好
-订阅/签名密钥或 DAV 端点：未配置时 `/status` 报 `configured: false`、查询返回
-`409 not_configured`，不会静默外联。每个插件在自己的挂载前缀下答 `GET <prefix>/status`，
-控制台八个面板读的就是这一条。
+`web3_bridge` 与四个连接器（`workflow_webhook`、`carddav_connector`、`caldav_connector`、
+`slack_discord`）默认关闭，各自跟着自己的 `POPOPX_PLUGIN_*` 打开。四个连接器还要求先在
+控制台配置好订阅/签名密钥、DAV 端点或 Slack/Discord webhook：未配置时 `/status` 报
+`configured: false`、查询返回 `409 not_configured`，不会静默外联。每个插件在自己的挂载前缀下
+答 `GET <prefix>/status`，控制台九个面板读的就是这一条。
 
 ## 开放工作流与 DAV 连接器
 
@@ -276,6 +279,64 @@ NEXT STEPS：把 `POPOPX_PUBLIC_BASE_URL` 设成手机真正加载的那个 http
   `LOCATION`、`ATTENDEE`、`ORGANIZER` 在解析时即丢弃，返回体只有 `busy`/`free` 区间
   与 `可预约` 标签；窗口最多 31 天、slot 15–240 分钟。
 
+**`slack_discord`（Slack / Discord 出站）**
+- 七个管理路由：`GET /status`、`GET|POST /workspaces`、
+  `PATCH|DELETE /workspaces/{id}`、`POST /send`、`GET /audit`。网关不保存任何消息历史，
+  也不学习 Slack/Discord 身份；正文只存在于请求体和那一次出站 POST 里，落盘的只有动作、
+  结果和 HTTP 状态码。
+- webhook URL 本身就是 bearer 凭据（路径即秘密），所以控制台只看得到主机名；
+  设置了 `POPOPX_VAULT_KEY` 时 URL 与逐工作区签名密钥都以 `vault1:` 密文落库。每个
+  工作区在创建/轮换时拿到一次独立的 HMAC-SHA256 密钥，投递带
+  `X-Popopx-Timestamp` 与 `X-Popopx-Signature: v1=<hex>`，签名串与告警入口同形。
+- 出站走 `connectors.request_pinned`：不跟随重定向、不走代理、DNS 解析结果先校验再连接。
+  公网目标必须是 HTTPS 且主机属于 Slack/Discord 的 webhook 域；`allow_private` 只给运维
+  自己起的回环接收器，局域网地址一律拒绝——否则 webhook bearer token 会明文出网。
+- 按 `slack_discord_event` 计费，投递失败自动退款并写审计；离线测试用本地 HTTP 接收器
+  验过签名、计费/退款、工作区更新和审计，但**没有连过真实的 Slack 或 Discord**。
+
+## 静态加密、作用域令牌与签名告警
+
+这一节的三项控制都默认不改变既有部署：vault 与告警签名只在设置对应环境变量时启用，
+作用域令牌是在根令牌之外新增的第二条凭据路径；根令牌本身不落库、行为不变。
+
+**静态加密（`POPOPX_VAULT_KEY`，`gateway/app/vault.py`）**
+- 64 hex 字符或 44 base64 字符的 32 字节操作者密钥（`openssl rand -hex 32`）。设置后，
+  `eco_sessions.secret_hex`、`channels.identity_sec_b64url`、`channel_epochs.key_b64url`、
+  `workflow_subscriptions.secret`、`dav_endpoints.password` 与
+  `slack_discord_workspaces.{webhook_url,secret}` 在写入 SQLite 前用 HKDF-SHA256 派生密钥 +
+  ChaCha20-Poly1305 封装，AAD 绑定 `表|列|主体`，行被搬到另一行会解密失败。密文带
+  `vault1:` 前缀；不带前缀的值按明文读，所以开启密钥可以不停机。
+- `python3 -m app.main --migrate-secrets` 把已有明文逐行封装，幂等、可重复跑；报告按
+  `sealed/skipped/errors` 三列打印，有错误就退出 1。**这把密钥是运维自己的**：丢了，
+  所有已封装的频道、会话和连接器凭据都不可恢复；它不从 `POPOPX_ADMIN_TOKEN` 派生，
+  也不要和数据目录放在同一份备份里。没装 `cryptography` 时启用密钥会在写入/读取处抛
+  `VaultUnavailable`，而不是退回明文。
+
+**作用域管理令牌（`gateway/app/admin_auth.py`，四条 `/api/v1/admin/tokens*` 路由）**
+- 根令牌仍由 `POPOPX_ADMIN_TOKEN` 提供，不存数据库。新增的 `pxa_…` 令牌只存 SHA-256
+  与 16 字符前缀，明文只在 `POST /api/v1/admin/tokens` 的响应里出现一次。
+  scope 语法只有三种：`*`、`core:<resource>:ro|rw`、`plugin:<id>:ro|rw`；`core:admin`
+  不是可授予的 scope，所以泄露的 scoped 令牌不能再造出更宽的令牌。`ro` 只允许
+  `GET`/`HEAD`，其余方法要 `rw`；`expires_in_days` 可选，范围 1–3650。
+- `GET /api/v1/admin/tokens` 列元数据（含前缀、scope、创建/最后使用/过期、是否撤销），
+  `DELETE /api/v1/admin/tokens/{token_id}` 撤销，`GET /api/v1/admin/tokens/audit?limit=`
+  读审计。四条都是 root-only：scoped 令牌访问它们得到 403。
+- 插件路径由中间件按 `PLUGIN_SPEC.url_prefix` 映射为 `plugin:<id>`，未知插件前缀只认根
+  令牌；核心路由按第一段路径映射为 `core:<resource>`，`/api/v1/admin/*` 只认根令牌。
+  缺失/未知/已撤销/已过期一律 401，scope 不够 403；根令牌的请求不写审计，scoped 请求
+  写 `used`/`scope_denied`/`revoked` 与状态码，最多保留 5000 行。控制台的「API 令牌」
+  面板就是这四条路由的管理界面。
+
+**告警入口签名（`POPOPX_ALERT_WEBHOOK_SECRET`，`alert_ops_plugin.py`）**
+- 设置后，`POST /api/v1/plugins/alerts/webhook` 在共享 `POPOPX_ALERT_WEBHOOK_TOKEN`
+  之后还要求 `X-Popopx-Timestamp: <unix 秒>` 与
+  `X-Popopx-Signature: v1=<hex HMAC-SHA256(secret, "<timestamp>.<raw body>")>`。
+  时间戳偏离 ±300 秒拒绝；同一 (timestamp, signature) 在进程内重放缓存里出现过也拒绝。
+  HMAC 先验、缓存后写，伪造请求不能靠刷缓存把真签名挤出去；签名比较是常数时间。
+- 重放缓存是**进程内**的 2048 条 OrderedDict；多进程/多实例部署要各自接受一次窗口内的
+  重放，或在外层反代上做去重。签名是强制项：配置了密钥而请求没签名就是 401，不会静默
+  退回“只验共享令牌”。
+
 ## 使用示例
 
 下面的字段名就是 handler 实际读的字段（`/api/v1/` 全部要带令牌）：
@@ -305,7 +366,7 @@ curl -s -X POST $API/api/v1/send/text -H "X-Admin-Token: $TOKEN" \
 # 4. 轮换付费频道密钥：epoch 自增，信封用频道 Ed25519 私钥签名
 curl -s -X POST "$API/api/v1/channels/$CHANNEL_ID/rotate" -H "X-Admin-Token: $TOKEN"
 
-# 5. 插件状态（控制台八个面板读的就是这一条）
+# 5. 插件状态（控制台九个面板读的就是这一条）
 curl -s $API/api/v1/plugins -H "X-Admin-Token: $TOKEN"
 curl -s $API/api/v1/plugins/alert_ops/status -H "X-Admin-Token: $TOKEN"
 
@@ -316,6 +377,13 @@ curl -s -X POST $API/api/v1/invite-links -H "X-Admin-Token: $TOKEN" \
      -H 'content-type: application/json' \
      -d '{"kind":"channel","channel_id":"'"$CHANNEL_ID"'"}'
 curl -s "$API/api/v1/invite-links/audit?limit=20" -H "X-Admin-Token: $TOKEN"
+
+# 7. 只读作用域令牌：明文只在响应里出现一次；之后 GET 可用、POST 403
+curl -s -X POST $API/api/v1/admin/tokens -H "X-Admin-Token: $TOKEN" \
+     -H 'content-type: application/json' \
+     -d '{"label":"read-only-status","scopes":["core:status:ro"],"expires_in_days":30}'
+curl -s $API/api/v1/status -H "X-Admin-Token: pxa_..."
+curl -s $API/api/v1/admin/tokens/audit?limit=20 -H "X-Admin-Token: $TOKEN"
 ```
 
 对外分享的字段是 `contact_link`（服务号）与 `invite_link`（频道），形如
@@ -335,19 +403,22 @@ curl -s "$API/api/v1/invite-links/audit?limit=20" -H "X-Admin-Token: $TOKEN"
 
 ## 接口一览
 
-118 条路由。本文件声明的 55 条由 `python3 -m app.main --print-routes` 打印，同一条命令顺手断言
-"每条管理路由都被 token 盖住"；八个插件另贡献 63 条（`workflow_webhook` 12、`alert_ops` 10、
+129 条路由。本文件声明的 59 条由 `python3 -m app.main --print-routes` 打印，同一条命令顺手断言
+"每条管理路由都被 token 盖住"；九个插件另贡献 70 条（`workflow_webhook` 12、`alert_ops` 10、
 `web3_bridge` 9、`polls` 8、`ai_agent` 6、`privacy_sso` 6、`carddav_connector` 6、
-`caldav_connector` 6），它们走 `include_router` 进来，`--print-routes` 看不见，
+`caldav_connector` 6、`slack_discord` 7），它们走 `include_router` 进来，`--print-routes` 看不见，
 所以自检里有 `every_plugin_*` 与逐插件的 `plugin_<id>_answers_status_at_its_own_prefix` 补上另一半。
 
-鉴权只有一条规则：`/api/v1/*` 要 `X-Admin-Token`，也收 `?token=`；缺失或不对一律
-`401 {"ok":false,"error":"unauthorized"}`。但请求头名并不统一：核心 `admin_required` 与插件
-中间件 `plugin_auth` 都只读 `x-admin-token` 或 `?token=`（`gateway/app/main.py:3185`、`:3266`），
-不解析 `Authorization: Bearer`——全套件只有 `privacy_sso` 的设备侧路由读它
-（`privacy_sso_plugin.py:1521` `bearer_secret`），`alert_ops` 的控制台路由读
-`X-Popopx-Admin-Token`（`alert_ops_plugin.py:1105`）。管理后台三个头一起发
-（`gateway/app/static/index.html:623`–`:627`），一个令牌不用按路由切换。五类例外：
+鉴权只有一条规则：`/api/v1/*` 要管理凭据，也收 `?token=`；缺失或不对一律
+`401 {"ok":false,"error":"unauthorized"}`，凭据有效但 scope 不够是 403。凭据可以是根令牌
+（`POPOPX_ADMIN_TOKEN`），也可以是 `POST /api/v1/admin/tokens` 铸出的 `pxa_…` scoped 令牌；
+两者都接受 `x-admin-token`、`X-Popopx-Admin-Token`、`Authorization: Bearer` 与 `?token=`
+这四种写法（`admin_auth.presented_credential`，`gateway/app/admin_auth.py:202`）。核心
+`admin_required` 与插件中间件 `admin_gate` 都走同一个解析器
+（`gateway/app/main.py:3461`、`:3583`），不再各自拼一套头名判断；`privacy_sso` 的设备侧
+路由仍只认 `Authorization`（`privacy_sso_plugin.py:1522` `bearer_secret`），`alert_ops` 的
+控制台路由也兼容 `X-Popopx-Admin-Token`（`alert_ops_plugin.py:1216`）。管理后台三个头
+一起发（`gateway/app/static/index.html:642`–`:644`），一个令牌不用按路由切换。五类例外：
 `/`、`/healthz`、`/h5/{article_id}` 公开；
 `POST /api/v1/verifyH5Auth` 靠手机侧的 HMAC 签名证明调用者；`POST /api/v1/workflows/trigger`
 只认 `X-PPX-Workflow-Token`（带过期、可撤销、按 scope 拒绝），管理令牌对它是无意义的；插件路径以 `/webhook`、`/verify`、
@@ -372,7 +443,7 @@ broker 超时……`node_error` 里就是原因），只有 `node_unreachable` �
 
 ## 配置
 
-全部配置项在根目录的 [`.env.example`](.env.example)（54 个键，每个都有注释；用
+全部配置项在根目录的 [`.env.example`](.env.example)（58 个键，每个都有注释；用
 `grep -cE '^[A-Z0-9_]+=' .env.example` 能数出同一个数），
 `cp .env.example .env` 之后改它。查找顺序是 `--env <path>` → `$POPOPX_ENV_FILE` →
 仓库根目录的 `.env`；进程环境覆盖文件里的同名键（编排器说的算）。
@@ -395,7 +466,7 @@ macOS 在 `/usr/local/etc/popopx-service-suite/env`——launchd 没有 `Environ
 
 ## 自检
 
-每个模块都自带 `self_test()`，共 19 组，用下面这条命令一次性跑完：
+每个模块都自带 `self_test()`，共 22 组，用下面这条命令一次性跑完：
 
 ```bash
 # 两个代码块都从仓库根目录起跑
@@ -407,24 +478,28 @@ token 盖住的_admin 路由就不该开始监听），完整套件是开发/发
 `start_macos.sh`、`install_macos.sh` 与 `install_ubuntu22.sh` 在最后一步打印出来供复制。
 
 权威计数是这条命令自己打出来的最后一行。本机 2026-11-26 用 `/usr/bin/python3` 跑只有标准库那一档
-（`cryptography` 和 `fastapi` 都没装），实测是 **2514 条 / 16 组**：`app.crypto_service.crypto_self_test`（缺 `cryptography`）、
+（`cryptography` 和 `fastapi` 都没装），实测是 **2637 条 / 19 组**：`app.crypto_service.crypto_self_test`（缺 `cryptography`）、
 `app.opaque_invite_codec.opaque_invite_self_test`（同样缺 `cryptography`）和 `app.main.http_self_test`（缺 `fastapi`）
 三组被运行器点名 `SKIPPED`，并打印 "those paths are NOT verified here"——这三组在本机一条都没跑过，不是"跑过了没记上"。
-同一台机器上换一个装了 `gateway/requirements.txt` 的 venv 再跑，实测 **2619 条 / 19 组**，多出来的正是那三组：
-运行器逐组打印 `crypto_self_test 6 checks`、`http_self_test 49 checks` 与
-`opaque_invite_codec.opaque_invite_self_test 50 checks`，19 组之和恰好等于总行
-（2514 + 6 + 49 + 50 = 2619），所以你机器上那一行也能这样拆开对账。协议层在两种解释器下都是同样的 307 条：
-缺少 `cryptography` 时新增的 invite 断言改为验证 `invite_crypto_unavailable` 这一具名降级答复，而不是悄悄跳过。
-上面每一档都在 2026-11-26 重测过：仓库 `.venv` 的 3.9.6（fastapi 0.128.8）与 `brew` 装的 3.11.18 各建一个 venv，
-两边同为 **2619 条 / 19 组、exit 0**。连接器那四组是 `app.connectors`（34）、`workflow_webhook_plugin`
-（57）、`carddav_connector`（43）、`caldav_connector`（48）；它们把 HMAC/SSRF、令牌过期与
-撤销、vCard 敏感字段剥离、CalDAV 标题零泄漏都放进了可执行断言。后一次不是重复劳动：`requirements.txt`
-钉的是区间，新 venv 因此拿到 fastapi 0.165.0 + starlette 1.10.0，而 starlette 1.x 的
-`include_router` 不再把插件路由摊平进 `app.routes`（改成挂一个嵌套的 `_IncludedRouter`），HTTP 组
-按 `isinstance(r, APIRoute)` 读一遍就少了 30 条插件路由、报出 39 个 verb+path「声明了却没装上」。
-实际 `GET /api/v1/plugins/ai/status` 仍然返回 200，OpenAPI 里也在——是量具瞎了，不是网关坏了。
-所以那条检查现在递归下钻嵌套路由再比，两个 fastapi 版本给同一个答案；把它证伪的控制实验也还在：
-把 `include_router` 换成空操作，两个版本都立刻报 `every_declared_route_is_actually_mounted`。
+同一台机器上换一个装了 `gateway/requirements.txt` 的 venv 再跑，实测 **2776 条 / 22 组**，多出来的
+正是那三组加 vault 的真实密码学分支：运行器逐组打印 `crypto_self_test 6 checks`、
+`http_self_test 67 checks` 与 `opaque_invite_codec.opaque_invite_self_test 50 checks`，而
+`app.vault` 在有 `cryptography` 时是 29 条、没有时只有 13 条（16 条真实封装/解封检查被换成一个
+具名的 `VaultUnavailable` 断言），所以 2637 + 6 + 50 + 67 + 16 = 2776。协议层在两种解释器下
+都是同样的 308 条；缺少 `cryptography` 时新增的 invite 断言改为验证
+`invite_crypto_unavailable` 这一具名降级答复，而不是悄悄跳过。上面每一档都在 2026-11-26 重测过：
+仓库 `.venv` 的 3.9.6（fastapi 0.128.8）与 `brew` 装的 3.11.18（fastapi 0.165.0）各建一个 venv，
+两边同为 **2776 条 / 22 组、exit 0**。连接器那五组是 `app.connectors`（34）、`workflow_webhook_plugin`
+（57）、`carddav_connector`（43）、`caldav_connector`（48）与 `slack_discord_plugin`（27）；它们把
+HMAC/SSRF、令牌过期与撤销、vCard 敏感字段剥离、CalDAV 标题零泄漏、逐工作区签名与失败退款
+都放进了可执行断言。作用域令牌那组是 `app.admin_auth`（51），静态加密是 `app.vault`（29）。
+后一次不是重复劳动：`requirements.txt` 钉的是区间，新 venv 因此拿到 fastapi 0.165.0 + starlette 1.10.0，
+而 starlette 1.x 的 `include_router` 不再把插件路由摊平进 `app.routes`（改成挂一个嵌套的
+`_IncludedRouter`），HTTP 组按 `isinstance(r, APIRoute)` 读一遍就少了 30 条插件路由、报出
+39 个 verb+path「声明了却没装上」。实际 `GET /api/v1/plugins/ai/status` 仍然返回 200，
+OpenAPI 里也在——是量具瞎了，不是网关坏了。所以那条检查现在递归下钻嵌套路由再比，
+两个 fastapi 版本给同一个答案；把它证伪的控制实验也还在：把 `include_router` 换成空操作，
+两个版本都立刻报 `every_declared_route_is_actually_mounted`。
 
 节点桥那组（`app.agent_bridge`，现 143 条）在同一版加了 3 条，起因是实机安装撞到的类别盲区：5225 上
 如果有东西应答但不是 HTTP，`websockets` 抛 `InvalidMessage`——`WebSocketException` 的子类、**不是**
@@ -433,14 +508,21 @@ token 盖住的_admin 路由就不该开始监听），完整套件是开发/发
 监听口、回非 HTTP 字节，让库自己决定异常类；最后一条直接断言 `start()` 兜底的类清单和装没装
 `websockets` 一致——缺 wheel 那档断言的是三元回退表，不是"跳过"，所以它不会在测不到的配置里悄悄为真。
 
-断言分布在：协议层、数据库、配置、计费、密码学、节点桥、八个插件、跨实现密码学、以及 HTTP 组
-`app.main.http_self_test`——最后一组真的向 ASGI 应用发请求，所以它能证明一个路由是被装上了还是只是写在源码里。
+断言分布在：协议层、数据库、配置、作用域令牌、静态加密、计费、密码学、节点桥、九个插件、
+跨实现密码学、以及 HTTP 组 `app.main.http_self_test`——最后一组真的向 ASGI 应用发请求，所以它能
+证明一个路由是被装上了还是只是写在源码里。
+
+`--self-test` 仍是唯一的真值门。`gateway/tests/` 只是 pytest 的薄适配器：参数化
+`SELF_TEST_MODULES` 并调用同一个 `self_test()`，对 `crypto_self_test`、
+`opaque_invite_self_test`、`http_self_test` 用 `importorskip` 保持与运行器相同的
+SKIPPED 语义，再调一次 `assert_routes_are_gated()`；它没有复制任何一条断言。
 
 ```bash
 # 同样从仓库根目录（跑过上一块就先 cd ..）
 python3.11 -m venv .venv                      # 3.11 是这套件的目标解释器，见 requirements.txt 头几行
-.venv/bin/pip install -r gateway/requirements.txt
-cd gateway && ../.venv/bin/python -m app.main --self-test   # 19 组全绿、无 SKIPPED（本机实测 2619 条）
+.venv/bin/pip install -r gateway/requirements-dev.txt
+cd gateway && ../.venv/bin/python -m app.main --self-test   # 22 组全绿、无 SKIPPED（本机实测 2776 条）
+../.venv/bin/python -m pytest                                # 22 passed：同一批 helper，不重复断言
 ```
 
 ## 跨实现密码学校验

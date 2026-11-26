@@ -1,8 +1,8 @@
 # Copyright (c) 2026 POPOPX (popopx.chat)
 # SPDX-License-Identifier: AGPL-3.0-only
-"""The plugin seam: one contract, eight plugins, and the 404-vs-402 distinction.
+"""The plugin seam: one contract, nine plugins, and the 404-vs-402 distinction.
 
-The eight business plugins live in this
+The nine business plugins live in this
 package and nothing else, so this file is deliberately small: it is the shape of
 the seam, not a framework. Everything the gateway itself owns (sessions, cards,
 menus, channels, the outbox, billing) lives in `app.main`; a plugin reaches it
@@ -48,6 +48,7 @@ if TYPE_CHECKING:  # imported for type names only, never at runtime
     from app.billing_service import BillingService
     from app.config import Config
     from app.database import Database
+    from app.vault import SecretBox
 
 __all__ = [
     "EcoSession",
@@ -154,6 +155,16 @@ PLUGIN_SPEC: Tuple[PluginSpec, ...] = (
         toggle="caldav_connector",
         meter="caldav_query",
         url_prefix="/api/v1/plugins/caldav",
+        callback_kinds=(),
+    ),
+    PluginSpec(
+        plugin_id="slack_discord",
+        module_name="app.plugins.slack_discord_plugin",
+        toggle="slack_discord",
+        meter="slack_discord_event",
+        url_prefix="/api/v1/plugins/slackdiscord",
+        # Outbound-only bridge: Slack/Discord replies arrive at the workspace's own
+        # webhook URL, never as an eco callback kind, so it claims nothing.
         callback_kinds=(),
     ),
 )
@@ -465,6 +476,15 @@ class PluginDeps:
     def plugin_id(self) -> str:
         return self.spec.plugin_id
 
+    @property
+    def vault(self) -> "SecretBox":
+        """The operator-held box for this plugin's own columns, disabled (plaintext
+        passthrough) when `POPOPX_VAULT_KEY` is unset. Cached per key inside
+        `vault_for`, so calling it per request does not rebuild the cipher."""
+        from app.vault import vault_for
+
+        return vault_for(self.config.vault_key)
+
     def require(self) -> GateDecision:
         """The one-line guard a route body starts with."""
         return self.gate.require(self.plugin_id)
@@ -530,7 +550,8 @@ def self_test() -> list:
     def gate(toggle_on: bool, fused: bool, node_up: bool = True) -> PluginGate:
         config = FakeConfig(FakePlugins(ai_agent=toggle_on, alert_ops=toggle_on, privacy_sso=toggle_on,
                                        polls=toggle_on, web3_bridge=toggle_on, workflow_webhook=toggle_on,
-                                       carddav_connector=toggle_on, caldav_connector=toggle_on))
+                                       carddav_connector=toggle_on, caldav_connector=toggle_on,
+                                       slack_discord=toggle_on))
         return PluginGate(config, FakeBilling(fused), lambda: node_up)
 
     # Enabled and paid: usable, and the balance travels with the decision.
@@ -581,12 +602,13 @@ def self_test() -> list:
         check("require_raises_when_unusable", exc.http_status == 404 and exc.decision.plugin_id == "ai_agent")
 
     # The mount table is internally consistent, and every row is distinct.
-    check("specs_unique_ids", len({s.plugin_id for s in PLUGIN_SPEC}) == len(PLUGIN_SPEC) == 8)
+    check("specs_unique_ids", len({s.plugin_id for s in PLUGIN_SPEC}) == len(PLUGIN_SPEC) == 9)
     check("specs_unique_meters", len({s.meter for s in PLUGIN_SPEC}) == len(PLUGIN_SPEC))
     check("specs_unique_prefixes", len({s.url_prefix for s in PLUGIN_SPEC}) == len(PLUGIN_SPEC))
     check("spec_toggles_are_known_names",
           all(s.toggle in ("ai_agent", "alert_ops", "privacy_sso", "polls", "web3_bridge",
-                           "workflow_webhook", "carddav_connector", "caldav_connector") for s in PLUGIN_SPEC))
+                           "workflow_webhook", "carddav_connector", "caldav_connector",
+                           "slack_discord") for s in PLUGIN_SPEC))
     for spec in PLUGIN_SPEC:
         check("spec_roundtrip_%s" % spec.plugin_id, plugin_for_id(spec.plugin_id) is spec)
         check("meter_roundtrip_%s" % spec.meter, plugin_for_meter(spec.meter) is spec)
@@ -623,4 +645,13 @@ def self_test() -> list:
     deps_shape = PluginDeps(config=None, db=None, billing=None, eco=None,  # type: ignore[arg-type]
                             gate=gate(True, False), spec=plugin_for_id("alert_ops"))
     check("deps_plugin_id_from_spec", deps_shape.plugin_id == "alert_ops")
+
+    class FakeConfigWithVault(FakeConfig):
+        vault_key = ""
+
+    vault_deps = PluginDeps(config=FakeConfigWithVault(FakePlugins()),  # type: ignore[arg-type]
+                            db=None, billing=None, eco=None,  # type: ignore[arg-type]
+                            gate=gate(True, False), spec=plugin_for_id("workflow_webhook"))
+    check("deps_expose_a_disabled_vault_without_a_key", vault_deps.vault.enabled is False)
+    check("deps_vault_is_cached_per_key", vault_deps.vault is vault_deps.vault)
     return checks

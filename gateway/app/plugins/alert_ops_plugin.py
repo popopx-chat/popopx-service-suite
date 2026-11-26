@@ -104,10 +104,13 @@ import math
 import re
 import secrets
 import sqlite3
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from app import admin_auth
 from app.crypto_service import (
     EcoError,
     EcoLimits,
@@ -314,6 +317,17 @@ MAX_WEBHOOK_BYTES = 262_144
 MAX_STORED_SUMMARY_CHARS = 4000
 MAX_PAGE_LIMIT = 200
 DEFAULT_PAGE_LIMIT = 50
+
+#: Optional HMAC over the raw webhook body. When POPOPX_ALERT_WEBHOOK_SECRET is
+#: set, the shared token is no longer enough: a captured request must not be
+#: replayable, so the signature covers a timestamp and the exact bytes, the
+#: timestamp has a bounded skew, and every accepted signature is remembered for
+#: the rest of its window.
+WEBHOOK_TIMESTAMP_HEADER = "X-Popopx-Timestamp"
+WEBHOOK_SIGNATURE_HEADER = "X-Popopx-Signature"
+WEBHOOK_SIGNATURE_VERSION = "v1"
+WEBHOOK_SIGNATURE_WINDOW_SECONDS = 300
+WEBHOOK_REPLAY_CACHE_SIZE = 2048
 
 #: Inclusive marker on a truncated string. Truncation must be *visible*: a body that
 #: quietly ends mid-sentence reads like the alert itself was short.
@@ -1080,6 +1094,103 @@ def authorize_webhook_token(headers: Mapping[str, str], configured: str) -> Tupl
     if constant_compare(provided, expected.strip()):
         return True, "ok"
     return False, "alert webhook token does not match"
+
+
+def _header_value(headers: Mapping[str, str], name: str) -> str:
+    wanted = str(name).lower()
+    for key, value in (headers.items() if isinstance(headers, Mapping) else ()):
+        if str(key).lower() == wanted:
+            return _label_text(value)
+    return ""
+
+
+class ReplayCache:
+    """Accepted signatures, kept only until their own timestamp window closes.
+
+    A sender that retries a *new* request with a fresh timestamp is fine; the same
+    signature twice is the replay this refuses. The cache is process-local on
+    purpose: a multi-process deployment would need a shared store, and pretending
+    otherwise here would be the kind of guarantee that only holds on one worker.
+    """
+
+    def __init__(self, capacity: int = WEBHOOK_REPLAY_CACHE_SIZE) -> None:
+        self.capacity = max(1, int(capacity))
+        self._entries: "OrderedDict[str, int]" = OrderedDict()
+        self._lock = threading.Lock()
+
+    def accept(self, signature: str, expires_at_seconds: int, now_seconds: int) -> bool:
+        with self._lock:
+            for key in list(self._entries):
+                if self._entries[key] <= now_seconds:
+                    del self._entries[key]
+                else:
+                    break
+            if signature in self._entries:
+                return False
+            self._entries[signature] = int(expires_at_seconds)
+            while len(self._entries) > self.capacity:
+                self._entries.popitem(last=False)
+            return True
+
+
+#: One cache for the gateway process. `verify_webhook_signature` takes an explicit
+#: cache so its self-test can prove replay refusal without sharing state.
+WEBHOOK_REPLAY_CACHE = ReplayCache()
+
+
+def sign_webhook_payload(secret: str, timestamp: int, body: bytes) -> str:
+    """`v1=<hex HMAC-SHA256(secret, "<timestamp>.<raw body>")>`."""
+    message = ("%d." % int(timestamp)).encode("ascii") + bytes(body)
+    digest = hmac.new(str(secret).encode("utf-8"), message, hashlib.sha256).hexdigest()
+    return "%s=%s" % (WEBHOOK_SIGNATURE_VERSION, digest)
+
+
+def verify_webhook_signature(
+    headers: Mapping[str, str],
+    body: bytes,
+    secret: str,
+    *,
+    replay_cache: Optional[ReplayCache] = None,
+    now_seconds: Optional[int] = None,
+) -> Tuple[bool, str]:
+    """The optional second factor: a timestamped HMAC over the exact request body.
+
+    Only called when a secret is configured, and then the signature is mandatory.
+    The order matters: the HMAC is checked *before* the replay cache is touched,
+    so an unauthenticated caller cannot evict real signatures by filling it.
+    """
+    expected_secret = str(secret or "").strip()
+    if not expected_secret:
+        return False, "POPOPX_ALERT_WEBHOOK_SECRET is not configured"
+    stamp_text = _header_value(headers, WEBHOOK_TIMESTAMP_HEADER).strip()
+    if not stamp_text:
+        return False, "missing %s" % WEBHOOK_TIMESTAMP_HEADER
+    try:
+        timestamp = int(stamp_text)
+    except (TypeError, ValueError):
+        return False, "%s must be integer seconds" % WEBHOOK_TIMESTAMP_HEADER
+    now = int(now_ms() // 1000) if now_seconds is None else int(now_seconds)
+    if abs(now - timestamp) > WEBHOOK_SIGNATURE_WINDOW_SECONDS:
+        return False, "timestamp is outside the ±%d s window" % WEBHOOK_SIGNATURE_WINDOW_SECONDS
+    provided = _header_value(headers, WEBHOOK_SIGNATURE_HEADER).strip()
+    prefix = WEBHOOK_SIGNATURE_VERSION + "="
+    if not provided.lower().startswith(prefix):
+        return False, "%s must be %s<hex>" % (WEBHOOK_SIGNATURE_HEADER, prefix)
+    digest_text = provided[len(prefix):].strip()
+    if len(digest_text) != 64:
+        return False, "signature must carry a SHA-256 hex digest"
+    try:
+        int(digest_text, 16)
+    except ValueError:
+        return False, "signature is not hexadecimal"
+    expected = sign_webhook_payload(expected_secret, timestamp, body)[len(prefix):]
+    if not hmac.compare_digest(digest_text.lower(), expected):
+        return False, "signature does not match the body"
+    if replay_cache is not None:
+        key = prefix + digest_text.lower()
+        if not replay_cache.accept(key, now + WEBHOOK_SIGNATURE_WINDOW_SECONDS, now):
+            return False, "this signature was already used"
+    return True, "ok"
 
 
 def authorize_admin_token(headers: Mapping[str, str], configured: str) -> Tuple[bool, str]:
@@ -2139,29 +2250,39 @@ def create_router(deps: PluginDeps) -> "APIRouter":
             return None, json_response(exc.http_status, exc.decision.as_body())
 
     def admin_refused(request: "Request") -> Optional[Any]:
+        # A scoped token reached this handler only after the gateway middleware
+        # checked `plugin:alert_ops`; the in-process check remains for a direct
+        # handler call, where that middleware never ran.
+        if admin_auth.grant_from_request(request) is not None:
+            return None
         ok, reason = authorize_admin_token(request.headers, getattr(deps.config, "admin_token", ""))
         if ok:
             return None
         return json_response(401, {"ok": False, "plugin": PLUGIN_ID, "reason": "unauthorized", "detail": reason})
 
-    async def read_json(request: "Request", *, allow_empty: bool = False) -> Tuple[Any, Optional[Any]]:
-        """The body as a JSON value, and a 4xx explaining why it is not.
+    async def read_raw(request: "Request") -> Tuple[bytes, Optional[Any]]:
+        """The raw body bytes, size-checked, so a signature can cover them.
 
-        Parsed from raw bytes rather than `request.json()` because Grafana posts
-        `application/json` while a hand-rolled sender posts `text/plain`, and a
-        content-type check that refuses a valid alert is a webhook that "randomly"
-        loses pages. The body itself is never logged at INFO.
-
-        `allow_empty` is for DELETE, where "no body" is the request "remove them
-        all" and must not be confused with a malformed one: a 400 on a truncated body
-        is correct, and silently emptying the target list would not be.
+        Starlette caches the body after the first read, so the JSON parse below
+        sees the same bytes the HMAC did — not a second read that could differ.
         """
         try:
             raw = await request.body()
         except Exception as exc:  # noqa: BLE001 - a broken body read is a client error
-            return None, json_response(400, {"ok": False, "detail": "body could not be read: %s" % type(exc).__name__})
+            return b"", json_response(400, {"ok": False, "detail": "body could not be read: %s" % type(exc).__name__})
         if len(raw) > MAX_WEBHOOK_BYTES:
-            return None, json_response(413, {"ok": False, "detail": "body over %d bytes" % MAX_WEBHOOK_BYTES})
+            return b"", json_response(413, {"ok": False, "detail": "body over %d bytes" % MAX_WEBHOOK_BYTES})
+        return raw, None
+
+    def parse_json_body(raw: bytes, *, allow_empty: bool = False) -> Tuple[Any, Optional[Any]]:
+        """Parse bytes as JSON; the content type is ignored on purpose.
+
+        Grafana posts `application/json` while a hand-rolled sender posts
+        `text/plain`, and a content-type check that refuses a valid alert is a
+        webhook that "randomly" loses pages. The body itself is never logged at
+        INFO. `allow_empty` is for DELETE, where "no body" is the request "remove
+        them all" and must not be confused with a malformed one.
+        """
         if not raw.strip():
             if allow_empty:
                 return None, None
@@ -2170,6 +2291,13 @@ def create_router(deps: PluginDeps) -> "APIRouter":
             return json.loads(raw.decode("utf-8", "replace")), None
         except ValueError:
             return None, json_response(400, {"ok": False, "detail": "body is not valid JSON"})
+
+    async def read_json(request: "Request", *, allow_empty: bool = False) -> Tuple[Any, Optional[Any]]:
+        """The body as a JSON value, and a 4xx explaining why it is not."""
+        raw, error = await read_raw(request)
+        if error is not None:
+            return None, error
+        return parse_json_body(raw, allow_empty=allow_empty)
 
     # ── the webhook ─────────────────────────────────────────────────────────
 
@@ -2180,16 +2308,32 @@ def create_router(deps: PluginDeps) -> "APIRouter":
         Auth before the gate here, unlike the console routes: the 402 body carries
         the account balance, and this endpoint is reachable by whatever the
         merchant's Grafana is, so an unauthenticated prober must not be able to read
-        it. The token check is the first thing that answers.
+        it. The token check is the first thing that answers. When
+        POPOPX_ALERT_WEBHOOK_SECRET is set, a valid shared token is followed by the
+        mandatory timestamped HMAC over the exact bytes, which also makes a captured
+        request unusable after its 300 s window.
         """
         ok, reason = authorize_webhook_token(request.headers, getattr(deps.config, "alert_webhook_token", ""))
         if not ok:
             LOG.warning("alert webhook refused: %s", reason)
             return json_response(401, {"ok": False, "plugin": PLUGIN_ID, "reason": "unauthorized", "detail": reason})
+        raw, error = await read_raw(request)
+        if error is not None:
+            return error
+        signing_secret = str(getattr(deps.config, "alert_webhook_secret", "") or "").strip()
+        if signing_secret:
+            signed, reason = verify_webhook_signature(
+                request.headers, raw, signing_secret, replay_cache=WEBHOOK_REPLAY_CACHE
+            )
+            if not signed:
+                LOG.warning("alert webhook signature refused: %s", reason)
+                return json_response(
+                    401, {"ok": False, "plugin": PLUGIN_ID, "reason": "unauthorized", "detail": reason}
+                )
         _decision, refusal = gated()
         if refusal is not None:
             return refusal
-        body, error = await read_json(request)
+        body, error = parse_json_body(raw)
         if error is not None:
             return error
         try:
@@ -2770,6 +2914,99 @@ def self_test() -> List[str]:
     check("admin_token_gateway_header_is_case_insensitive", authorize_admin_token({"x-admin-token": "adm"}, "adm")[0] is True)
     check("admin_token_unrelated_header_refuses", authorize_admin_token({"X-Admin-Key": "adm"}, "adm")[0] is False)
     check("admin_token_short_value_is_not_a_prefix_match", authorize_admin_token({"X-Admin-Token": "ad"}, "adm")[0] is False)
+
+    # ── the optional signed webhook ─────────────────────────────────────────
+    signing_secret = "alert-signing-secret-0123456789ab"
+    signed_body = b'{"status":"firing","alerts":[]}'
+    signed_at = 1_700_000_000
+    signed_headers = {
+        WEBHOOK_TIMESTAMP_HEADER: str(signed_at),
+        WEBHOOK_SIGNATURE_HEADER: sign_webhook_payload(signing_secret, signed_at, signed_body),
+    }
+    signature_cache = ReplayCache(capacity=8)
+    check("a_signed_webhook_is_accepted",
+          verify_webhook_signature(
+              signed_headers, signed_body, signing_secret,
+              replay_cache=signature_cache, now_seconds=signed_at,
+          )[0])
+    replayed, replay_reason = verify_webhook_signature(
+        signed_headers, signed_body, signing_secret,
+        replay_cache=signature_cache, now_seconds=signed_at,
+    )
+    check("the_same_signature_is_refused_the_second_time",
+          replayed is False and "already used" in replay_reason)
+    check("a_tampered_body_is_refused",
+          verify_webhook_signature(
+              signed_headers, signed_body + b" ", signing_secret,
+              replay_cache=ReplayCache(), now_seconds=signed_at,
+          )[0] is False)
+    check("a_wrong_secret_is_refused",
+          verify_webhook_signature(
+              signed_headers, signed_body, "another-secret",
+              replay_cache=ReplayCache(), now_seconds=signed_at,
+          )[0] is False)
+    check("a_stale_timestamp_is_refused",
+          verify_webhook_signature(
+              signed_headers, signed_body, signing_secret,
+              replay_cache=ReplayCache(), now_seconds=signed_at + WEBHOOK_SIGNATURE_WINDOW_SECONDS + 1,
+          )[0] is False)
+    check("a_future_timestamp_is_refused",
+          verify_webhook_signature(
+              signed_headers, signed_body, signing_secret,
+              replay_cache=ReplayCache(), now_seconds=signed_at - WEBHOOK_SIGNATURE_WINDOW_SECONDS - 1,
+          )[0] is False)
+    check("a_missing_timestamp_is_refused",
+          verify_webhook_signature(
+              {WEBHOOK_SIGNATURE_HEADER: signed_headers[WEBHOOK_SIGNATURE_HEADER]},
+              signed_body, signing_secret, replay_cache=ReplayCache(), now_seconds=signed_at,
+          )[0] is False)
+    check("a_missing_signature_is_refused",
+          verify_webhook_signature(
+              {WEBHOOK_TIMESTAMP_HEADER: str(signed_at)},
+              signed_body, signing_secret, replay_cache=ReplayCache(), now_seconds=signed_at,
+          )[0] is False)
+    check("a_naked_hex_digest_is_not_accepted_as_v1",
+          verify_webhook_signature(
+              {WEBHOOK_TIMESTAMP_HEADER: str(signed_at),
+               WEBHOOK_SIGNATURE_HEADER: signed_headers[WEBHOOK_SIGNATURE_HEADER].split("=", 1)[1]},
+              signed_body, signing_secret, replay_cache=ReplayCache(), now_seconds=signed_at,
+          )[0] is False)
+    check("a_short_signature_is_refused",
+          verify_webhook_signature(
+              {WEBHOOK_TIMESTAMP_HEADER: str(signed_at), WEBHOOK_SIGNATURE_HEADER: "v1=abc"},
+              signed_body, signing_secret, replay_cache=ReplayCache(), now_seconds=signed_at,
+          )[0] is False)
+    check("a_non_hex_signature_is_refused",
+          verify_webhook_signature(
+              {WEBHOOK_TIMESTAMP_HEADER: str(signed_at), WEBHOOK_SIGNATURE_HEADER: "v1=" + "z" * 64},
+              signed_body, signing_secret, replay_cache=ReplayCache(), now_seconds=signed_at,
+          )[0] is False)
+    check("a_different_body_reusing_a_signature_is_refused",
+          verify_webhook_signature(
+              signed_headers, b'{"status":"resolved"}', signing_secret,
+              replay_cache=ReplayCache(), now_seconds=signed_at,
+          )[0] is False)
+    check("signature_headers_are_case_insensitive",
+          verify_webhook_signature(
+              {"x-popopx-timestamp": str(signed_at),
+               "x-popopx-signature": signed_headers[WEBHOOK_SIGNATURE_HEADER]},
+              signed_body, signing_secret, replay_cache=ReplayCache(), now_seconds=signed_at,
+          )[0])
+    check("an_unset_signing_secret_refuses_rather_than_skips",
+          verify_webhook_signature(
+              signed_headers, signed_body, "", replay_cache=ReplayCache(), now_seconds=signed_at,
+          )[0] is False)
+    bounded = ReplayCache(capacity=2)
+    check("the_replay_cache_evicts_its_oldest_entry",
+          bounded.accept("a", signed_at + 100, signed_at)
+          and bounded.accept("b", signed_at + 100, signed_at)
+          and bounded.accept("c", signed_at + 100, signed_at)
+          and bounded.accept("a", signed_at + 100, signed_at) is True
+          and bounded.accept("c", signed_at + 100, signed_at) is False)
+    expiring = ReplayCache(capacity=8)
+    check("the_replay_cache_forgets_an_expired_signature",
+          expiring.accept("x", signed_at + 1, signed_at)
+          and expiring.accept("x", signed_at + 2, signed_at + 2) is True)
 
     # ── the one-charge-per-incident rule ────────────────────────────────────
     first = charge_request(fingerprint="fp-7", alert_id="al-1", contact_id=None, severity="critical")

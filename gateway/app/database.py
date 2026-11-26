@@ -620,6 +620,63 @@ CREATE TABLE IF NOT EXISTS dav_endpoints (
     last_probe_status   INTEGER,
     last_probe_error    TEXT
 );
+
+-- ───────────────────────── scoped admin tokens ──────────────────────────
+-- The root `POPOPX_ADMIN_TOKEN` is never stored; these are the fine-grained
+-- tokens an operator mints for a dashboard or a script. Only the SHA-256 of the
+-- token is kept, so a database copy cannot be replayed against the gateway.
+-- `scopes` is a JSON array of `core:<resource>:ro|rw`, `plugin:<id>:ro|rw`, `*`.
+CREATE TABLE IF NOT EXISTS admin_tokens (
+    id                  TEXT PRIMARY KEY,
+    label               TEXT NOT NULL DEFAULT '',
+    token_prefix        TEXT NOT NULL,
+    token_hash          TEXT NOT NULL UNIQUE,
+    scopes              TEXT NOT NULL DEFAULT '[]',
+    revoked             INTEGER NOT NULL DEFAULT 0,
+    expires_at_ms       INTEGER,
+    created_at_ms       INTEGER NOT NULL,
+    last_used_at_ms     INTEGER
+);
+
+-- Every scoped-token decision worth reviewing: mint, revoke, refusal. The path
+-- is stored without query string; no header, body or token ever lands here.
+CREATE TABLE IF NOT EXISTS admin_token_audit (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_id            TEXT,
+    action              TEXT NOT NULL,
+    path                TEXT NOT NULL DEFAULT '',
+    outcome             TEXT NOT NULL,
+    status_code         INTEGER,
+    created_at_ms       INTEGER NOT NULL
+);
+
+-- ───────────────────────── Slack / Discord bridge ───────────────────────
+-- One row per workspace webhook. `secret` is the per-workspace HMAC signing
+-- secret, sealed by the vault when POPOPX_VAULT_KEY is set. No message text is
+-- ever stored: the audit table below records only the action and outcome.
+CREATE TABLE IF NOT EXISTS slack_discord_workspaces (
+    id                  TEXT PRIMARY KEY,
+    label               TEXT NOT NULL DEFAULT '',
+    platform            TEXT NOT NULL CHECK (platform IN ('slack','discord')),
+    webhook_url         TEXT NOT NULL,
+    secret              TEXT NOT NULL DEFAULT '',
+    allow_private       INTEGER NOT NULL DEFAULT 0,
+    active              INTEGER NOT NULL DEFAULT 1,
+    created_at_ms       INTEGER NOT NULL,
+    updated_at_ms       INTEGER NOT NULL,
+    last_delivery_ms    INTEGER,
+    last_status_code    INTEGER,
+    last_error          TEXT
+);
+
+CREATE TABLE IF NOT EXISTS slack_discord_audit (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id        TEXT NOT NULL,
+    action              TEXT NOT NULL,
+    outcome             TEXT NOT NULL,
+    status_code         INTEGER,
+    created_at_ms       INTEGER NOT NULL
+);
 """
 
 
@@ -918,13 +975,15 @@ def self_test() -> List[str]:
     main_conn = db.connection()
     main_id = id(main_conn)
     check("the_same_thread_gets_the_same_handle", db.connection() is main_conn)
-    handle_ids: List[int] = []
+    handles: List[Any] = []
     errors: List[str] = []
 
     def worker() -> None:
         try:
             other = db.connection()
-            handle_ids.append(id(other))
+            # Keep the object alive: a dead thread's thread-local can be freed and
+            # CPython may hand the same address (and id()) to the next thread.
+            handles.append(other)
             if other is main_conn:
                 errors.append("a thread was handed another thread's connection")
         except Exception as exc:  # noqa: BLE001
@@ -935,6 +994,7 @@ def self_test() -> List[str]:
         thread.start()
     for thread in threads:
         thread.join()
+    handle_ids = [id(handle) for handle in handles]
     check("four_threads_opened_four_connections", errors == [] and len(set(handle_ids)) == 4 and all(value != main_id for value in handle_ids))
     crossed: List[str] = []
 

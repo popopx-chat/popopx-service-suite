@@ -7,15 +7,17 @@
 English · 中文：[`README.md`](README.md)
 
 The backend suite for POPOPX service accounts: a gateway (FastAPI), the POPX-CP credit
-meter, channel envelope encryption with zero-knowledge key rotation, eight business plugins
+meter, channel envelope encryption with zero-knowledge key rotation, nine business plugins
 and a browser admin console. The wire protocol is aligned byte-for-byte with the shipped
 POPOPX iOS client. The open-source node is reached only over
 `ws://127.0.0.1:5225`; this suite links against, patches and redistributes none of its code.
 
-Three of those plugins face self-hosted office stacks: `workflow_webhook` signs every outbound
+Four of those plugins face self-hosted office stacks: `workflow_webhook` signs every outbound
 event with HMAC-SHA256 for Node-RED / Activepieces and forces inbound actions into a
 human-confirmation card; `carddav_connector` and `caldav_connector` query on demand and strip
-private contact fields and meeting titles before anything is returned.
+private contact fields and meeting titles before anything is returned; `slack_discord` treats
+one workspace's incoming webhook as an independent outbound channel, keeps a per-workspace
+signing secret and meters each delivery.
 
 ## License and trademarks
 
@@ -49,9 +51,11 @@ popopx-service-suite/
 └── gateway/
     ├── Dockerfile
     ├── requirements.txt     fastapi / uvicorn / pydantic / cryptography / httpx / qrcode / websockets
-    └── app/                 config database billing_service crypto_service agent_bridge main
+    ├── requirements-dev.txt the same runtime set plus pytest (test adapter only; no launcher reads it)
+    ├── tests/               pytest adapter over each module's self_test(); no duplicated assertions
+    └── app/                 config database admin_auth vault billing_service crypto_service agent_bridge main
         ├── plugins/         ai_agent alert_ops privacy_sso polls web3_bridge
-        │                    workflow_webhook carddav_connector caldav_connector
+        │                    workflow_webhook carddav_connector caldav_connector slack_discord
         └── static/          index.html admin console
 ```
 
@@ -63,9 +67,9 @@ popopx-service-suite/
   reduced server for a machine without them: `create_app()` raises `RuntimeError: FastAPI is
   not installed; run ./start_macos.sh, ./install_macos.sh or ./install_ubuntu22.sh first`, with
   the `ImportError`
-  text appended (`gateway/app/main.py:3109`). What a standard-library-only machine *can* do is
-  run 16 of the 19 self-test groups, because the runner names the three that need those wheels
-  as `SKIPPED` — that is what the **2514 checks across 16 groups** figure below is, and it is
+  text appended (`gateway/app/main.py:3385`). What a standard-library-only machine *can* do is
+  run 19 of the 22 self-test groups, because the runner names the three that need those wheels
+  as `SKIPPED` — that is what the **2637 checks across 19 groups** figure below is, and it is
   not a gateway answering requests.
 - A running `popopx-agent` / `popopx-chat` node exposing its WebSocket control API on
   `127.0.0.1:5225`.
@@ -185,7 +189,7 @@ Measured offline on this machine: `--help`, `--check` and `--dry-run` (including
 all exit 0, both plists pass `plutil -lint`, and the dry-run proves with `cksum` that a
 pre-existing env file survives byte-identical with one `.bak.<utc>` added. `brew`'s Python 3.11.18
 passes the interpreter gate, and a venv built from it with `gateway/requirements.txt` actually
-installed measures **2619 checks across 19 groups, exit 0** on `--self-test` (that run also caught
+installed measures **2776 checks across 22 groups, exit 0** on `--self-test` (that run also caught
 an HTTP instrument that goes blind only on the newer starlette — see **Self-test** below).
 
 The sudo install that really starts the service **was run on this Mac on 2026-11-22**:
@@ -290,16 +294,16 @@ A node that is not up at launch is not fatal: the gateway serves anyway, `/healt
 `node_connected: false`, and the bridge retries on a capped backoff, attaching by itself
 once the node answers (`strict=True` is reserved for callers that want fail-fast).
 
-`ai_agent`, `alert_ops`, `privacy_sso` and `polls` are on by default; `web3_bridge` and the three
-connectors (`workflow_webhook`, `carddav_connector`, `caldav_connector`) are off until their own
-`POPOPX_PLUGIN_*` flag is set. The connectors also require configuration before use: without it
-`/status` reports `configured: false` and queries answer `409 not_configured` rather than
-silently reaching out. Each plugin answers `GET <its own prefix>/status`, which is what the eight
-console panels read.
+`ai_agent`, `alert_ops`, `privacy_sso` and `polls` are on by default; `web3_bridge` and the four
+connectors (`workflow_webhook`, `carddav_connector`, `caldav_connector`, `slack_discord`) are off
+until their own `POPOPX_PLUGIN_*` flag is set. The connectors also require configuration before
+use: without it `/status` reports `configured: false` and queries answer `409 not_configured`
+rather than silently reaching out. Each plugin answers `GET <its own prefix>/status`, which is
+what the nine console panels read.
 
 ## Open workflow and DAV connectors
 
-All three connectors ship disabled and need configuration first; the console's
+All four connectors ship disabled and need configuration first; the console's
 "Workflows & DAV" panel is their management surface.
 
 **`workflow_webhook` (Node-RED / Activepieces)**
@@ -343,16 +347,86 @@ All three connectors ship disabled and need configuration first; the console's
   the response only carries `busy`/`free` intervals and the `可预约` label. Windows are capped
   at 31 days and slots at 15–240 minutes.
 
+**`slack_discord` (Slack / Discord outbound)**
+- Seven admin routes: `GET /status`, `GET|POST /workspaces`, `PATCH|DELETE /workspaces/{id}`,
+  `POST /send`, `GET /audit`. The gateway stores no message history and learns no Slack or
+  Discord identity; the text exists only in the request body and the one outbound POST, and
+  the durable trace is the action, outcome and HTTP status code.
+- The webhook URL is itself a bearer credential (the path is the secret), so the console only
+  ever sees the host. With `POPOPX_VAULT_KEY` set, both the URL and the per-workspace signing
+  secret are stored as `vault1:` ciphertext. Each workspace receives its own HMAC-SHA256
+  secret once at create/rotate time; every delivery carries `X-Popopx-Timestamp` and
+  `X-Popopx-Signature: v1=<hex>`, the same shape as the alert intake.
+- Delivery goes through `connectors.request_pinned`: no redirects, no proxy, DNS checked
+  before connecting. Public targets must be HTTPS on a Slack/Discord webhook host;
+  `allow_private` is only for an operator-run loopback receiver, and LAN addresses are refused
+  because the webhook bearer token would leave in clear text.
+- Metered as `slack_discord_event`; a failed delivery is refunded and audited. The offline test
+  covers signing, charging/refund, workspace updates and audit against a local HTTP receiver,
+  but **no real Slack or Discord workspace has been contacted**.
+
+## Secrets at rest, scoped tokens and signed alert intake
+
+All three controls leave an existing deployment unchanged: the vault and the alert signature
+switch on only when their environment key is set, and scoped tokens are a second credential
+path beside the root token. The root token stays unstored and behaves exactly as before.
+
+**Secrets at rest (`POPOPX_VAULT_KEY`, `gateway/app/vault.py`)**
+- A 32-byte operator key (64 hex or 44 base64 characters, `openssl rand -hex 32`). When set,
+  `eco_sessions.secret_hex`, `channels.identity_sec_b64url`, `channel_epochs.key_b64url`,
+  `workflow_subscriptions.secret`, `dav_endpoints.password` and
+  `slack_discord_workspaces.{webhook_url,secret}` are sealed with HKDF-SHA256 and
+  ChaCha20-Poly1305 before they reach SQLite. The AAD binds `table|column|subject`, so moving
+  a ciphertext to another row fails to decrypt. Sealed values carry a `vault1:` prefix;
+  unprefixed values are read as plaintext, so enabling the key needs no downtime.
+- `python3 -m app.main --migrate-secrets` seals existing plaintext idempotently and prints a
+  `sealed/skipped/errors` report per table/column, exiting 1 on any error. **The key belongs
+  to the operator**: losing it makes every sealed channel, session and connector credential
+  unreadable; it is not derived from `POPOPX_ADMIN_TOKEN`, and it must not live in the same
+  backup as the database directory. Without the `cryptography` wheel, an enabled key raises
+  `VaultUnavailable` at the write/read boundary instead of falling back to plaintext.
+
+**Scoped admin tokens (`gateway/app/admin_auth.py`, four `/api/v1/admin/tokens*` routes)**
+- The root token still comes from `POPOPX_ADMIN_TOKEN` and is never stored. A minted `pxa_…`
+  token stores only its SHA-256 and a 16-character prefix; the plaintext appears once in the
+  `POST /api/v1/admin/tokens` response. The scope grammar has exactly three forms: `*`,
+  `core:<resource>:ro|rw`, `plugin:<id>:ro|rw`. `core:admin` is not grantable, so a leaked
+  scoped token cannot mint a wider one. `ro` allows only `GET`/`HEAD`; every other method
+  needs `rw`. `expires_in_days` is optional and bounded to 1–3650.
+- `GET /api/v1/admin/tokens` lists metadata (prefix, scopes, created/last-used/expiry, revoked),
+  `DELETE /api/v1/admin/tokens/{token_id}` revokes, and
+  `GET /api/v1/admin/tokens/audit?limit=` reads the audit. All four are root-only: a scoped
+  token gets 403.
+- Middleware maps plugin paths through `PLUGIN_SPEC.url_prefix` to `plugin:<id>`; an unknown
+  plugin prefix is root-only. Core paths map from their first segment; `/api/v1/admin/*` is
+  always root-only. Missing/unknown/revoked/expired credentials are 401, an insufficient scope
+  is 403. Root-token requests are not audited; scoped requests record `used`/
+  `scope_denied`/`revoked` with the status code, keeping the latest 5000 rows. The console's
+  "API tokens" panel is the management surface for these four routes.
+
+**Signed alert intake (`POPOPX_ALERT_WEBHOOK_SECRET`, `alert_ops_plugin.py`)**
+- When set, `POST /api/v1/plugins/alerts/webhook` requires, after the shared
+  `POPOPX_ALERT_WEBHOOK_TOKEN`, both `X-Popopx-Timestamp: <unix seconds>` and
+  `X-Popopx-Signature: v1=<hex HMAC-SHA256(secret, "<timestamp>.<raw body>")>`. A timestamp
+  outside ±300 seconds is refused, and so is a (timestamp, signature) pair already seen in the
+  process-local replay cache. The HMAC is checked before the cache is written, so forged
+  requests cannot evict a genuine signature; the comparison is constant-time.
+- The cache is a 2048-entry OrderedDict **inside one process**; a multi-process or multi-instance
+  deployment accepts a replay per process unless a shared deduplicator sits in front. The
+  signature is mandatory: with the secret configured, an unsigned request is 401 and never
+  falls back to "shared token only".
+
 ## Typical operations
 
-Every `/api/v1/` call takes the admin token in a header (a `?token=` query parameter is also
-accepted). The header name is literal, and the suite does not use one name everywhere: the
-core's `admin_required` reads only `x-admin-token` or `?token=`
-(`gateway/app/main.py:3185`, `:3266`) and never parses `Authorization: Bearer`; the one
-place that does is `privacy_sso`'s device-facing route (`privacy_sso_plugin.py:1521`
-`bearer_secret`); `alert_ops`' console routes read `X-Popopx-Admin-Token`
-(`alert_ops_plugin.py:1105`). The console sends all three at once
-(`gateway/app/static/index.html:623`–`:627`) so one token works whichever route it lands on.
+Every `/api/v1/` call takes a credential: either the root admin token in a header (a `?token=`
+query parameter is also accepted) or a scoped `pxa_…` token minted at
+`POST /api/v1/admin/tokens`. Four spellings are accepted everywhere —
+`x-admin-token`, `X-Popopx-Admin-Token`, `Authorization: Bearer` and `?token=` — and a scoped
+token without the required scope gets 403 rather than 401 (`admin_auth.py:202`). The one
+deployment-visible exception is `privacy_sso`'s device-facing route, whose device secret is
+also read as a bearer credential (`privacy_sso_plugin.py:1522`); `alert_ops`' webhook keeps
+its own shared token (`alert_ops_plugin.py:1216`). The console sends header and query at once
+(`gateway/app/static/index.html:642`–`:644`) so one token works whichever route it lands on.
 Field names below are the ones the handlers read.
 
 ```bash
@@ -415,22 +489,33 @@ asked at all.
 
 ## API overview
 
-118 routes. The 55 declared in this file's tree are printed by
+129 routes. The 59 declared in this file's tree are printed by
 `python3 -m app.main --print-routes`, which also asserts that every admin route is covered by
-the token. The eight plugins add the other 63 (`workflow_webhook` 12, `alert_ops` 10,
+the token. The nine plugins add the other 70 (`workflow_webhook` 12, `alert_ops` 10,
 `web3_bridge` 9, `polls` 8, `ai_agent` 6, `privacy_sso` 6, `carddav_connector` 6,
-`caldav_connector` 6); they arrive through `include_router`, invisible to
+`caldav_connector` 6, `slack_discord` 7); they arrive through `include_router`, invisible to
 `--print-routes`, so `every_plugin_*` plus a per-plugin
 `plugin_<id>_answers_status_at_its_own_prefix` cover the second half in the self-test.
 
-Authorisation is one rule: `/api/v1/*` requires `X-Admin-Token`; a missing or wrong token is
-always `401 {"ok":false,"error":"unauthorized"}`. Five classes of exception: `/`, `/healthz`
-and `/h5/{article_id}` are public; `POST /api/v1/verifyH5Auth` proves its caller with a
-device-side HMAC instead of a token; `POST /api/v1/workflows/trigger` accepts only
-`X-PPX-Workflow-Token` (expiring, revocable, scope-checked), for which the admin token is
-meaningless; plugin paths ending in `/webhook`, `/verify` or `/callback` skip the token (they
-carry a per-source token or a back-to-back caller); and `GET /api/v1/plugins/sso/sessions/{id}`
-is exempt because the scan page has to poll it before any login state exists.
+Authorisation is one rule: `/api/v1/*` requires a credential and also accepts `?token=`; a
+missing or wrong credential is always `401 {"ok":false,"error":"unauthorized"}`, while a valid
+credential with an insufficient scope is 403. The credential is either the root token
+(`POPOPX_ADMIN_TOKEN`) or a scoped `pxa_…` token minted at `POST /api/v1/admin/tokens`; both
+are accepted as `x-admin-token`, `X-Popopx-Admin-Token`, `Authorization: Bearer` and
+`?token=` (`admin_auth.presented_credential`, `gateway/app/admin_auth.py:202`). Core
+`admin_required` and the plugin middleware `admin_gate` share that resolver
+(`gateway/app/main.py:3461`, `:3583`) instead of each assembling its own header test;
+`privacy_sso`'s device-facing route still reads only `Authorization`
+(`privacy_sso_plugin.py:1522` `bearer_secret`), and `alert_ops`' console routes also accept
+`X-Popopx-Admin-Token` (`alert_ops_plugin.py:1216`). The console sends all three at once
+(`gateway/app/static/index.html:642`–`:644`) so one token works whichever route it lands on.
+Five classes of exception: `/`, `/healthz` and `/h5/{article_id}` are public;
+`POST /api/v1/verifyH5Auth` proves its caller with a device-side HMAC instead of a token;
+`POST /api/v1/workflows/trigger` accepts only `X-PPX-Workflow-Token` (expiring, revocable,
+scope-checked), for which the admin token is meaningless; plugin paths ending in `/webhook`,
+`/verify` or `/callback` skip the token (they carry a per-source token or a back-to-back
+caller); and `GET /api/v1/plugins/sso/sessions/{id}` is exempt because the scan page has to
+poll it before any login state exists.
 
 Errors are always `{"ok": false, "error": "<code>", "detail": "…"}`, and the HTTP code is
 chosen by the operational action it implies:
@@ -452,7 +537,7 @@ internal function, so a failure still answers 200 and the body's `error` is the 
 
 ## Configuration
 
-Every key lives in the root [`.env.example`](.env.example) (54 keys, each commented — count
+Every key lives in the root [`.env.example`](.env.example) (58 keys, each commented — count
 them with `grep -cE '^[A-Z0-9_]+=' .env.example`);
 `cp .env.example .env` and edit that. Lookup order is `--env <path>` → `$POPOPX_ENV_FILE` →
 `.env` at the repository root, and process environment overrides keys from the file (the
@@ -481,10 +566,10 @@ non-boolean switch. Unrecognised `POPOPX_*` keys are ignored, not an error.
 
 ## Self-test
 
-Every module ships a `self_test()`; 19 groups in total, run in one command:
+Every module ships a `self_test()`; 22 groups in total, run in one command:
 
 ```bash
-# from the repository root
+# both code blocks start from the repository root
 cd gateway && python3 -m app.main --self-test
 ```
 
@@ -495,24 +580,28 @@ copying as the last step by `start_macos.sh`, `install_macos.sh` and `install_ub
 
 The authoritative count is the last line that command prints. On this machine on 2026-11-26
 `/usr/bin/python3` has only the standard library (no `cryptography`, no `fastapi`), and the
-measured result was **2514 checks across 16 groups**: `app.crypto_service.crypto_self_test` (needs
+measured result was **2637 checks across 19 groups**: `app.crypto_service.crypto_self_test` (needs
 `cryptography`), `app.opaque_invite_codec.opaque_invite_self_test` (also `cryptography`) and
 `app.main.http_self_test` (needs `fastapi`) were named as `SKIPPED` by the runner, which prints
 "those paths are NOT verified here" — those three groups ran zero checks here, which is not the
 same as having run and not been counted. Re-running on the same machine inside a venv that has
-`gateway/requirements.txt` installed measured **2619 checks across 19 groups**, and the
-difference is exactly those three groups: the runner prints `crypto_self_test 6 checks`,
-`http_self_test 49 checks` and `opaque_invite_codec.opaque_invite_self_test 50 checks` per
-group, and the 19 group figures sum to the total line (2514 + 6 + 49 + 50 = 2619), so you can
-audit your own run the same way. The protocol layer is the same 307 checks on both interpreters:
-without `cryptography` the new invite assertions verify the named `invite_crypto_unavailable`
-degradation instead of being skipped. Every figure above was re-measured on 2026-11-26: the
-repository `.venv`'s 3.9.6 (fastapi 0.128.8) and a fresh venv built from `brew`'s Python 3.11.18
-both measure **2619 checks across 19 groups, exit 0**.
-The four connector groups are `app.connectors` (34), `workflow_webhook_plugin` (57),
-`carddav_connector` (43) and `caldav_connector` (48); HMAC/SSRF refusal, token expiry and
-revocation, vCard stripping and zero CalDAV title leakage are executable assertions.
-The second one was not a formality: `requirements.txt` pins ranges, so the new venv resolved
+`gateway/requirements.txt` installed measured **2776 checks across 22 groups**, and the
+difference is exactly those three groups plus the vault's real-cryptography branch: the runner
+prints `crypto_self_test 6 checks`, `http_self_test 67 checks` and
+`opaque_invite_codec.opaque_invite_self_test 50 checks` per group, while `app.vault` reports
+29 checks with `cryptography` present and only 13 without it (16 real seal/open checks are
+replaced by a named `VaultUnavailable` assertion), so `2637 + 6 + 50 + 67 + 16 = 2776`. The
+protocol layer is the same 308 checks on both interpreters: without `cryptography` the new
+invite assertions verify the named `invite_crypto_unavailable` degradation instead of being
+skipped. Every figure above was re-measured on 2026-11-26: the repository `.venv`'s 3.9.6
+(fastapi 0.128.8) and a fresh venv built from `brew`'s Python 3.11.18 (fastapi 0.165.0) both
+measure **2776 checks across 22 groups, exit 0**.
+The five connector groups are `app.connectors` (34), `workflow_webhook_plugin` (57),
+`carddav_connector` (43), `caldav_connector` (48) and `slack_discord_plugin` (27); HMAC/SSRF
+refusal, token expiry and revocation, vCard stripping, zero CalDAV title leakage, per-workspace
+signing and failed-delivery refunds are executable assertions. The scoped-token group is
+`app.admin_auth` (51); encryption at rest is `app.vault` (29).
+The second run was not a formality: `requirements.txt` pins ranges, so the new venv resolved
 fastapi 0.165.0 with starlette 1.10.0, and starlette 1.x no longer flattens an
 `include_router()` into `app.routes` — it keeps one nested `_IncludedRouter` in their place.
 Reading the flat list through `isinstance(r, APIRoute)` therefore lost 30 plugin routes and
@@ -534,16 +623,23 @@ library pick the exception class; the last one asserts that the classes `start()
 whether or not `websockets` is installed — on a wheel-less machine it asserts the three-class
 fallback rather than skipping, so it cannot quietly read true on the configuration it cannot test.
 
-Assertions cover the protocol layer, database, configuration, billing, cryptography, the node
-bridge, the eight plugins, cross-implementation cryptography, and the HTTP group
-`app.main.http_self_test` — that last one issues real requests against the ASGI app, so it can
-tell a mounted route from a route that merely exists in source.
+Assertions cover the protocol layer, database, configuration, scoped tokens, encryption at
+rest, billing, cryptography, the node bridge, the nine plugins, cross-implementation
+cryptography, and the HTTP group `app.main.http_self_test` — that last one issues real requests
+against the ASGI app, so it can tell a mounted route from a route that merely exists in source.
+
+`--self-test` stays the only truth gate. `gateway/tests/` is a thin pytest adapter: it
+parametrises `SELF_TEST_MODULES` and calls the same `self_test()`, uses `importorskip` for
+`crypto_self_test`, `opaque_invite_self_test` and `http_self_test` to keep the runner's
+SKIPPED semantics, then calls `assert_routes_are_gated()` once; it does not copy a single
+assertion.
 
 ```bash
 # Still from the repository root (cd .. if the block above left you in gateway/)
 python3.11 -m venv .venv                      # 3.11 is the suite's target interpreter
-.venv/bin/pip install -r gateway/requirements.txt
-cd gateway && ../.venv/bin/python -m app.main --self-test   # 19 groups green, no SKIPPED (2619 here)
+.venv/bin/pip install -r gateway/requirements-dev.txt
+cd gateway && ../.venv/bin/python -m app.main --self-test   # 22 groups green, no SKIPPED (2776 here)
+../.venv/bin/python -m pytest                                # 22 passed: same helpers, no copied assertions
 ```
 
 ## Cross-implementation crypto check

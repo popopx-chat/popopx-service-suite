@@ -29,6 +29,7 @@ import quopri
 import time
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from app import admin_auth
 from app.connectors import (
     ConnectorError,
     audit_rows,
@@ -461,7 +462,9 @@ async def _dav_request(deps: PluginDeps, row: Mapping[str, Any], *, method: str,
         "Accept": "application/xml, text/xml",
         "User-Agent": "POPOPX-CardDAV/1.0",
     }
-    auth = basic_auth_header(str(row.get("username") or ""), str(row.get("password") or ""))
+    plain_password = deps.vault.open(str(row.get("password") or ""), table="dav_endpoints",
+                                    column="password", subject=ENDPOINT_KIND)
+    auth = basic_auth_header(str(row.get("username") or ""), plain_password)
     if auth:
         headers["Authorization"] = auth
     return await _run_pinned(method, endpoint.origin + endpoint.target, headers, body or b"", bool(row.get("allow_private")))
@@ -488,6 +491,8 @@ def create_router(deps: PluginDeps) -> "APIRouter":
         return JSONResponse(status_code=int(status), content=dict(body))
 
     def admin_refused(request: "Request") -> Optional[Any]:
+        if admin_auth.grant_from_request(request) is not None:
+            return None
         ok, reason = authorize_admin(request.headers, getattr(deps.config, "admin_token", ""))
         if ok:
             return None
@@ -540,12 +545,15 @@ def create_router(deps: PluginDeps) -> "APIRouter":
         except ConnectorError as exc:
             return json_response(exc.http_status, {"ok": False, "error": exc.code, "detail": exc.message})
         username = str(body.get("username", (current or {}).get("username") or ""))[:200]
-        password = body.get("password")
-        if password is None:
-            password = (current or {}).get("password") or ""
-        password = str(password)
-        if len(password) > 512:
-            return json_response(400, {"ok": False, "error": "password_too_long"})
+        if body.get("password") is not None:
+            password = str(body.get("password"))
+            if len(password) > 512:
+                return json_response(400, {"ok": False, "error": "password_too_long"})
+            stored_password = deps.vault.seal(password, table="dav_endpoints",
+                                              column="password", subject=ENDPOINT_KIND)
+        else:
+            # A reused value may already be sealed; pass it through untouched.
+            stored_password = str((current or {}).get("password") or "")
         now = _now_ms()
         deps.db.execute(
             "INSERT INTO dav_endpoints (connector, url, username, password, allow_private, field_allowlist, updated_at_ms)"
@@ -553,7 +561,7 @@ def create_router(deps: PluginDeps) -> "APIRouter":
             " ON CONFLICT(connector) DO UPDATE SET url = excluded.url, username = excluded.username,"
             " password = excluded.password, allow_private = excluded.allow_private,"
             " field_allowlist = excluded.field_allowlist, updated_at_ms = excluded.updated_at_ms",
-            (ENDPOINT_KIND, endpoint.origin + endpoint.target, username, password, int(bool(body.get("allow_private", (current or {}).get("allow_private")))), json_dumps(list(allowlist)), now),
+            (ENDPOINT_KIND, endpoint.origin + endpoint.target, username, stored_password, int(bool(body.get("allow_private", (current or {}).get("allow_private")))), json_dumps(list(allowlist)), now),
         )
         record_audit(deps.db, connector="carddav", direction="outbound", action="config.update",
                      source="admin", outcome="updated", status_code=200)

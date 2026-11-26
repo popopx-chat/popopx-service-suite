@@ -185,6 +185,7 @@ from collections import deque
 from collections.abc import Mapping as _MappingABC
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from app import admin_auth
 from app.billing_service import BillingError
 from app.crypto_service import (
     ACTION_KINDS,
@@ -1944,11 +1945,28 @@ def create_router(deps: "PluginDeps") -> "APIRouter":
     @router.get("/audit", summary=_ROUTE_DOC_AUDIT)
     async def get_audit(request: "Request") -> Any:
         deps.require()
-        expected = str(getattr(deps.config, "admin_token", "") or "")
-        if not expected or not secret_matches(bearer_secret(request), expected):
+        grant = admin_auth.grant_from_request(request)
+        if grant is None:
+            # Direct handler call: the gateway middleware never ran. Resolve the
+            # same credential here so a scoped `plugin:privacy_sso:ro` token works
+            # through the mounted app and through this module's own tests alike.
+            presented = admin_auth.presented_credential(
+                request.headers, request.query_params.get("token") or ""
+            )
+            grant, _rejected = admin_auth.resolve_presented(
+                deps.db, presented, str(getattr(deps.config, "admin_token", "") or ""),
+                path=request.url.path,
+            )
+        if grant is None:
             return reply(
                 {"ok": False, "error": "unauthorized", "detail": "this list needs the gateway's admin bearer"},
                 status=401,
+            )
+        if not admin_auth.scope_allows(grant, "plugin:" + PLUGIN_ID):
+            return reply(
+                {"ok": False, "error": "forbidden",
+                 "detail": "this admin token does not allow the privacy_sso audit"},
+                status=403,
             )
         raw_limit = request.query_params.get("limit") if request.query_params else None
         try:
