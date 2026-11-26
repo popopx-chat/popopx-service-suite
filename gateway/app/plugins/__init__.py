@@ -1,8 +1,8 @@
 # Copyright (c) 2026 POPOPX (popopx.chat)
 # SPDX-License-Identifier: AGPL-3.0-only
-"""The plugin seam: one contract, five plugins, and the 404-vs-402 distinction.
+"""The plugin seam: one contract, eight plugins, and the 404-vs-402 distinction.
 
-The five business plugins live in this
+The eight business plugins live in this
 package and nothing else, so this file is deliberately small: it is the shape of
 the seam, not a framework. Everything the gateway itself owns (sessions, cards,
 menus, channels, the outbox, billing) lives in `app.main`; a plugin reaches it
@@ -71,7 +71,7 @@ class PluginSpec:
     meter prices it, which URL prefix it owns, and which inbound callback kinds it
     may claim.
 
-    These five tuples are the whole reason the five plugins cannot drift apart from
+    These tuples are the whole reason the plugins cannot drift apart from
     `config.PluginToggles` and `billing_service`'s meter names silently: the mount
     loop, the gate and the console all read them from here rather than repeating
     string literals that a rename would break one at a time.
@@ -129,6 +129,32 @@ PLUGIN_SPEC: Tuple[PluginSpec, ...] = (
         # A chain payment receipt is the only inbound signal a bridge produces for
         # the gateway; `CHANNEL_PAY_RCPT` carries channelId:credits:txHash.
         callback_kinds=("system",),
+    ),
+    PluginSpec(
+        plugin_id="workflow_webhook",
+        module_name="app.plugins.workflow_webhook_plugin",
+        toggle="workflow_webhook",
+        meter="workflow_event",
+        url_prefix="/api/v1/plugins/workflow",
+        # It only claims the two approval payload prefixes and returns False for
+        # every other callback, so alert_ops/polls keep receiving theirs.
+        callback_kinds=("card_callback",),
+    ),
+    PluginSpec(
+        plugin_id="carddav_connector",
+        module_name="app.plugins.carddav_connector",
+        toggle="carddav_connector",
+        meter="carddav_query",
+        url_prefix="/api/v1/plugins/carddav",
+        callback_kinds=(),
+    ),
+    PluginSpec(
+        plugin_id="caldav_connector",
+        module_name="app.plugins.caldav_connector",
+        toggle="caldav_connector",
+        meter="caldav_query",
+        url_prefix="/api/v1/plugins/caldav",
+        callback_kinds=(),
     ),
 )
 
@@ -491,7 +517,8 @@ def self_test() -> list:
 
     def gate(toggle_on: bool, fused: bool, node_up: bool = True) -> PluginGate:
         config = FakeConfig(FakePlugins(ai_agent=toggle_on, alert_ops=toggle_on, privacy_sso=toggle_on,
-                                       polls=toggle_on, web3_bridge=toggle_on))
+                                       polls=toggle_on, web3_bridge=toggle_on, workflow_webhook=toggle_on,
+                                       carddav_connector=toggle_on, caldav_connector=toggle_on))
         return PluginGate(config, FakeBilling(fused), lambda: node_up)
 
     # Enabled and paid: usable, and the balance travels with the decision.
@@ -529,11 +556,12 @@ def self_test() -> list:
         check("require_raises_when_unusable", exc.http_status == 404 and exc.decision.plugin_id == "ai_agent")
 
     # The mount table is internally consistent, and every row is distinct.
-    check("specs_unique_ids", len({s.plugin_id for s in PLUGIN_SPEC}) == len(PLUGIN_SPEC) == 5)
+    check("specs_unique_ids", len({s.plugin_id for s in PLUGIN_SPEC}) == len(PLUGIN_SPEC) == 8)
     check("specs_unique_meters", len({s.meter for s in PLUGIN_SPEC}) == len(PLUGIN_SPEC))
     check("specs_unique_prefixes", len({s.url_prefix for s in PLUGIN_SPEC}) == len(PLUGIN_SPEC))
     check("spec_toggles_are_known_names",
-          all(s.toggle in ("ai_agent", "alert_ops", "privacy_sso", "polls", "web3_bridge") for s in PLUGIN_SPEC))
+          all(s.toggle in ("ai_agent", "alert_ops", "privacy_sso", "polls", "web3_bridge",
+                           "workflow_webhook", "carddav_connector", "caldav_connector") for s in PLUGIN_SPEC))
     for spec in PLUGIN_SPEC:
         check("spec_roundtrip_%s" % spec.plugin_id, plugin_for_id(spec.plugin_id) is spec)
         check("meter_roundtrip_%s" % spec.meter, plugin_for_meter(spec.meter) is spec)

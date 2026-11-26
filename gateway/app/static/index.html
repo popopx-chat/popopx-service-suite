@@ -405,7 +405,38 @@ var API = {
   web3Whitelist:["GET", "/api/v1/plugins/web3/whitelist"],
   web3WhitelistAdd:["POST", "/api/v1/plugins/web3/whitelist"],
   web3WhitelistDel:["DELETE", "/api/v1/plugins/web3/whitelist"],
-  web3Events:   ["GET", "/api/v1/plugins/web3/events"]
+  web3Events:   ["GET", "/api/v1/plugins/web3/events"],
+
+  /* —— 插件：开放工作流（Node-RED / Activepieces） —— */
+  workflowStatus: ["GET", "/api/v1/plugins/workflow/status"],
+  workflowSubs: ["GET", "/api/v1/plugins/workflow/subscriptions"],
+  workflowSubAdd: ["POST", "/api/v1/plugins/workflow/subscriptions"],
+  workflowSubPatch: ["PATCH", "/api/v1/plugins/workflow/subscriptions/{subscription_id}"],
+  workflowSubDel: ["DELETE", "/api/v1/plugins/workflow/subscriptions/{subscription_id}"],
+  workflowSubTest: ["POST", "/api/v1/plugins/workflow/subscriptions/{subscription_id}/test"],
+  workflowDeliveries: ["GET", "/api/v1/plugins/workflow/deliveries"],
+  workflowTokens: ["GET", "/api/v1/plugins/workflow/tokens"],
+  workflowTokenAdd: ["POST", "/api/v1/plugins/workflow/tokens"],
+  workflowTokenDel: ["DELETE", "/api/v1/plugins/workflow/tokens/{token_id}"],
+  workflowApprovals: ["GET", "/api/v1/plugins/workflow/approvals"],
+  workflowAudit: ["GET", "/api/v1/plugins/workflow/audit"],
+  workflowTrigger: ["POST", "/api/v1/workflows/trigger"],
+
+  /* —— 插件：CardDAV 通讯录 —— */
+  carddavStatus: ["GET", "/api/v1/plugins/carddav/status"],
+  carddavConfig: ["GET", "/api/v1/plugins/carddav/config"],
+  carddavConfigPut: ["PUT", "/api/v1/plugins/carddav/config"],
+  carddavProbe: ["POST", "/api/v1/plugins/carddav/probe"],
+  carddavQuery: ["POST", "/api/v1/plugins/carddav/query"],
+  carddavAudit: ["GET", "/api/v1/plugins/carddav/audit"],
+
+  /* —— 插件：CalDAV 日历 —— */
+  caldavStatus: ["GET", "/api/v1/plugins/caldav/status"],
+  caldavConfig: ["GET", "/api/v1/plugins/caldav/config"],
+  caldavConfigPut: ["PUT", "/api/v1/plugins/caldav/config"],
+  caldavProbe: ["POST", "/api/v1/plugins/caldav/probe"],
+  caldavFreebusy: ["POST", "/api/v1/plugins/caldav/freebusy"],
+  caldavAudit: ["GET", "/api/v1/plugins/caldav/audit"]
 };
 
 /* 导航目标：不由 fetch 调用，而是拼成链接交给浏览器/手机打开。
@@ -420,7 +451,10 @@ var PLUGINS = [
   { key: "alerts", id: "alert_ops",    name: "告警运营",  meter: "alert",      prefix: "/api/v1/plugins/alerts" },
   { key: "sso",    id: "privacy_sso",  name: "免密登录",  meter: "sso_login",  prefix: "/api/v1/plugins/sso" },
   { key: "polls",  id: "polls",        name: "投票",      meter: "poll",       prefix: "/api/v1/plugins/polls" },
-  { key: "web3",   id: "web3_bridge",  name: "Web3 桥",   meter: "web3_event", prefix: "/api/v1/plugins/web3" }
+  { key: "web3",   id: "web3_bridge",  name: "Web3 桥",   meter: "web3_event", prefix: "/api/v1/plugins/web3" },
+  { key: "workflow", id: "workflow_webhook", name: "开放工作流", meter: "workflow_event", prefix: "/api/v1/plugins/workflow" },
+  { key: "carddav", id: "carddav_connector", name: "CardDAV 通讯录", meter: "carddav_query", prefix: "/api/v1/plugins/carddav" },
+  { key: "caldav", id: "caldav_connector", name: "CalDAV 日历", meter: "caldav_query", prefix: "/api/v1/plugins/caldav" }
 ];
 
 var NAV = [
@@ -444,7 +478,8 @@ var NAV = [
       { k: "alerts", n: "告警运营" },
       { k: "sso", n: "免密登录" },
       { k: "polls", n: "投票" },
-      { k: "web3", n: "Web3 桥" }
+      { k: "web3", n: "Web3 桥" },
+      { k: "workflows", n: "工作流与 DAV" }
   ] },
   { grp: "运维", items: [
       { k: "outbox", n: "出站队列" },
@@ -1133,7 +1168,7 @@ VIEWS.overview = function (host) {
   var nodeS = section("节点链路", "与本机 SimpleX 节点的 ws 通道");
   var billS = section("算力", "POPX-CP：默认开箱即用；兑换即入账，开启准入后耗尽即熔断插件");
   var reachS = section("触达与存储", "各表行数取自 GET /api/v1/status 的 counts");
-  var plugS = section("插件", "五个插件的装载、开关与熔断状态", [btn("插件详情", function () { location.hash = "#ai"; return null; }, { tone: "mini gho" })]);
+  var plugS = section("插件", "八个插件的装载、开关与熔断状态", [btn("插件详情", function () { location.hash = "#ai"; return null; }, { tone: "mini gho" })]);
   [svcS, nodeS, billS, reachS, plugS].forEach(function (s) { host.appendChild(s.node); });
 
   async function refresh() {
@@ -3316,7 +3351,395 @@ VIEWS.web3 = function (host) {
 };
 
 /* ======================================================================== *
- * 6k. 运维：出站队列、回调、设置、诊断
+ * 6k. 插件控制台：开放工作流与 DAV 连接器
+ * ======================================================================== */
+
+var WF_OUT_SCOPES = ["message.received", "card.callback", "approval.pending", "approval.decided", "workflow.test"];
+var WF_IN_SCOPES = ["message.send", "approval.request"];
+
+function scopePicker(names, defaults) {
+  var boxes = names.map(function (name) {
+    var box = chk(name, defaults.indexOf(name) >= 0);
+    box.name = name;
+    return box;
+  });
+  return {
+    node: h("div", { class: "row", style: "flex-wrap:wrap;gap:8px" }, boxes.map(function (b) { return b.node; })),
+    values: function () {
+      return boxes.filter(function (b) { return b.get(); }).map(function (b) { return b.name; });
+    }
+  };
+}
+
+function auditTable(rows, empty) {
+  return tableOf([
+    { label: "时间", get: function (a) { return localDate(a.ts_ms).slice(5); } },
+    { label: "方向", get: function (a) { return chip(a.direction, a.direction === "inbound" ? "i" : ""); } },
+    { label: "动作", k: "action" },
+    { label: "来源", get: function (a) { return h("span", { class: "mono", text: a.source }); } },
+    { label: "scope", get: function (a) { return h("span", { class: "mono", text: a.scope || "—" }); } },
+    { label: "状态码", get: function (a) { return a.status_code === null || a.status_code === undefined ? "—" : String(a.status_code); } },
+    { label: "结果", get: function (a) { return chip(a.outcome, a.outcome === "ok" || a.outcome === "created" || a.outcome === "updated" ? "g" : "w"); } },
+    { label: "耗时", get: function (a) { return a.latency_ms === null || a.latency_ms === undefined ? "—" : a.latency_ms + " ms"; } }
+  ], rows || [], empty || "（还没有连接器审计）");
+}
+
+VIEWS.workflows = function (host) {
+  var headWf = pluginHeader("workflow", "workflowStatus");
+  var headCd = pluginHeader("carddav", "carddavStatus");
+  var headCal = pluginHeader("caldav", "caldavStatus");
+  host.appendChild(headWf.node);
+  host.appendChild(headCd.node);
+  host.appendChild(headCal.node);
+
+  var subS = section("出站 Webhook 订阅", "事件推到 Node-RED / Activepieces 的入口；每个订阅独立签名密钥，只发被勾选的 scope");
+  var tokS = section("入站触发令牌", "流程节点调用 POST /api/v1/workflows/trigger 时携带 X-PPX-Workflow-Token；令牌只显示一次");
+  var trigS = section("触发自检", "带 action 的请求会被强制转成人工确认卡片，不可能直接执行");
+  var logS = section("投递、审批与审计", "审计只存时间、来源、scope、状态码与耗时，不存 URL、正文或密钥");
+  [subS, tokS, trigS, logS].forEach(function (x) { host.appendChild(x.node); });
+
+  /* —— 出站订阅 —— */
+  var subLabel = inp({ placeholder: "例如 Node-RED 生产流" });
+  var subUrl = inp({ class: "in mono", placeholder: "https://flow.example.com/webhook/ppx" });
+  var subPrivate = chk("允许私网/本机地址（仅自建的 HTTPS/HTTP 端点）", false);
+  var subScopes = scopePicker(WF_OUT_SCOPES, ["message.received", "card.callback", "approval.pending", "approval.decided"]);
+  var subOut = h("div");
+  var subList = h("div");
+  subS.body.appendChild(h("div", { class: "grid2" }, field("名称", subLabel), field("Webhook URL", subUrl, "公网地址必须 HTTPS；169.254.169.254 等元数据地址永远拒绝")));
+  subS.body.appendChild(h("div", { style: "margin-top:8px" }, subPrivate.node));
+  subS.body.appendChild(h("div", { style: "margin-top:8px" }, field("事件 scope", subScopes.node)));
+  subS.body.appendChild(h("div", { class: "row", style: "margin-top:10px" },
+    btn("创建订阅", function () {
+      if (!String(subUrl.value || "").trim()) { toast("需要 Webhook URL", "bad"); return Promise.reject(new ApiError("缺少 URL", { status: 0, code: "console_missing_url" })); }
+      var body = { url: subUrl.value.trim(), allow_private: subPrivate.get(), scopes: subScopes.values() };
+      if (String(subLabel.value || "").trim()) body.label = subLabel.value.trim();
+      return call("workflowSubAdd", { body: body }).then(function (r) {
+        subOut.appendChild(resultBox("订阅已创建：签名密钥只显示这一次", r));
+        subUrl.value = ""; subLabel.value = "";
+        return refreshSubs();
+      });
+    }, { tone: "pri", out: function () { return subOut; } }),
+    btn("刷新列表", function () { return refreshSubs(); }, { tone: "gho" })));
+  subS.body.appendChild(subList);
+  subS.body.appendChild(subOut);
+
+  function refreshSubs() {
+    return call("workflowSubs").then(function (r) {
+      clear(subList);
+      subList.appendChild(tableOf([
+        { label: "id", get: function (s) { return h("span", { class: "mono", text: short(s.id, 10, 4) }); } },
+        { label: "名称", k: "label" },
+        { label: "URL", get: function (s) { return h("span", { class: "mono", title: s.url, text: short(s.url, 34, 10) }); } },
+        { label: "scopes", get: function (s) { return h("span", { class: "mono", text: (s.scopes || []).join(",") }); } },
+        { label: "状态", get: function (s) {
+            if (!s.active) return chip("已停用", "b");
+            if (s.circuit_open) return chip("熔断中", "w");
+            return chip("启用", "g");
+          } },
+        { label: "连续失败", get: function (s) { return h("span", { class: "num", text: String(s.failures) }); } },
+        { label: "最近成功", get: function (s) { return s.last_success_ms ? ago(s.last_success_ms) : "—"; } },
+        { label: "最近错误", get: function (s) { return s.last_error ? h("span", { title: s.last_error, text: String(s.last_error).slice(0, 40) }) : "—"; } },
+        { label: "操作", get: function (s) {
+            return h("div", { class: "row" },
+              btn("探活", function () {
+                return call("workflowSubTest", { params: { subscription_id: s.id } }).then(function (r) {
+                  subOut.appendChild(resultBox("测试投递", r)); return refreshSubs();
+                });
+              }, { tone: "mini", out: function () { return subOut; } }),
+              btn("换密钥", function () {
+                return call("workflowSubPatch", { params: { subscription_id: s.id }, body: { rotate_secret: true } }).then(function (r) {
+                  subOut.appendChild(resultBox("新签名密钥（只显示这一次）", r)); return refreshSubs();
+                });
+              }, { tone: "mini gho", out: function () { return subOut; }, confirm: "旧密钥立即失效，接收端必须同步改为新密钥。确认？" }),
+              s.active ? btn("停用", function () {
+                return call("workflowSubDel", { params: { subscription_id: s.id } }).then(function (r) {
+                  subOut.appendChild(resultBox("已停用", r)); return refreshSubs();
+                });
+              }, { tone: "mini dan", out: function () { return subOut; }, confirm: "停用后该订阅不再接收事件（记录保留）。确认？" }) : null);
+          } }
+      ], r.subscriptions || [], "（还没有订阅）"));
+      return r;
+    });
+  }
+
+  /* —— 入站令牌 —— */
+  var tokLabel = inp({ placeholder: "例如 审批流 / 告警自动化" });
+  var tokExpiry = sel([
+    ["3600", "1 小时"], ["86400", "1 天"], ["2592000", "30 天"], ["7776000", "90 天"], ["0", "永不过期"]
+  ], { class: "in" });
+  var tokScopes = scopePicker(WF_IN_SCOPES, WF_IN_SCOPES);
+  var tokOut = h("div");
+  var tokList = h("div");
+  tokS.body.appendChild(h("div", { class: "grid2" }, field("名称", tokLabel), field("有效期", tokExpiry)));
+  tokS.body.appendChild(h("div", { style: "margin-top:8px" }, field("允许的入站 scope", tokScopes.node)));
+  tokS.body.appendChild(h("div", { class: "row", style: "margin-top:10px" },
+    btn("生成令牌", function () {
+      var body = { expires_in_seconds: Number(tokExpiry.value), scopes: tokScopes.values() };
+      if (String(tokLabel.value || "").trim()) body.label = tokLabel.value.trim();
+      return call("workflowTokenAdd", { body: body }).then(function (r) {
+        tokOut.appendChild(resultBox("令牌只显示这一次：立即填入流程节点", r));
+        tokLabel.value = "";
+        return refreshTokens();
+      });
+    }, { tone: "pri", out: function () { return tokOut; } }),
+    btn("刷新列表", function () { return refreshTokens(); }, { tone: "gho" })));
+  tokS.body.appendChild(tokList);
+  tokS.body.appendChild(tokOut);
+
+  function refreshTokens() {
+    return call("workflowTokens").then(function (r) {
+      clear(tokList);
+      tokList.appendChild(tableOf([
+        { label: "id", get: function (t) { return h("span", { class: "mono", text: short(t.id, 10, 4) }); } },
+        { label: "名称", k: "label" },
+        { label: "前缀", get: function (t) { return h("span", { class: "mono", text: t.prefix + "…" }); } },
+        { label: "scopes", get: function (t) { return h("span", { class: "mono", text: (t.scopes || []).join(",") }); } },
+        { label: "状态", get: function (t) {
+            if (t.revoked) return chip("已撤销", "b");
+            if (t.expired) return chip("已过期", "w");
+            return chip("有效", "g");
+          } },
+        { label: "过期于", get: function (t) { return t.expires_at_ms ? localDate(t.expires_at_ms) : "永不"; } },
+        { label: "最近使用", get: function (t) { return t.last_used_at_ms ? ago(t.last_used_at_ms) : "—"; } },
+        { label: "操作", get: function (t) {
+            return t.revoked ? null : btn("撤销", function () {
+              return call("workflowTokenDel", { params: { token_id: t.id } }).then(function (r) {
+                tokOut.appendChild(resultBox("已撤销", r)); return refreshTokens();
+              });
+            }, { tone: "mini dan", out: function () { return tokOut; }, confirm: "撤销后流程节点立即收到 403 token_revoked。确认？" });
+          } }
+      ], r.tokens || [], "（还没有令牌）"));
+      return r;
+    });
+  }
+
+  /* —— 触发自检 —— */
+  var wfTokenIn = inp({ class: "in mono", placeholder: "粘贴一条入站令牌（仅用于本次自检，不保存）", type: "password" });
+  var wfContact = targetsBox({ explicit: true });
+  var wfKind = sel([["text", "文本消息"], ["approval", "审批请求（人工确认卡片）"]], { class: "in" });
+  var wfText = area({ rows: 3, placeholder: "文本内容；审批模式下作为 summary" });
+  var wfTitle = inp({ placeholder: "审批标题（可选）" });
+  var wfAction = area({ rows: 3, placeholder: '可选 action JSON，例如 {"kind":"external.change","target":"crm"}；非空即强制审批' });
+  var wfRid = inp({ class: "in mono", placeholder: "request_id（可选，幂等重放）" });
+  var trigOut = h("div");
+  trigS.body.appendChild(field("X-PPX-Workflow-Token", wfTokenIn, "控制台不会保存这个值；它只出现在本次请求头里"));
+  trigS.body.appendChild(wfContact.node);
+  trigS.body.appendChild(h("div", { class: "grid2", style: "margin-top:8px" }, field("模式", wfKind), field("审批标题", wfTitle)));
+  trigS.body.appendChild(h("div", { class: "grid2", style: "margin-top:8px" }, field("文本 / summary", wfText), field("action JSON", wfAction)));
+  trigS.body.appendChild(h("div", { style: "margin-top:8px" }, field("request_id", wfRid)));
+  trigS.body.appendChild(h("div", { class: "row", style: "margin-top:10px" },
+    btn("发送触发", function () {
+      var ids = wfContact.ids();
+      if (!ids.length) { toast("请选择一个联系人", "bad"); return Promise.reject(new ApiError("未选择联系人", { status: 0, code: "console_no_target" })); }
+      if (!String(wfTokenIn.value || "").trim()) { toast("请粘贴流程令牌", "bad"); return Promise.reject(new ApiError("缺少令牌", { status: 0, code: "console_missing_token" })); }
+      var body = { contact_id: ids[0], kind: wfKind.value };
+      if (wfKind.value === "approval") {
+        body.title = String(wfTitle.value || "").trim() || "控制台审批自检";
+        body.summary = String(wfText.value || "").trim() || "控制台发起的审批自检";
+      } else {
+        body.text = String(wfText.value || "").trim();
+      }
+      if (String(wfRid.value || "").trim()) body.request_id = String(wfRid.value).trim();
+      var actionText = String(wfAction.value || "").trim();
+      if (actionText) {
+        var parsed;
+        try { parsed = JSON.parse(actionText); } catch (e) {
+          toast("action 不是合法 JSON", "bad");
+          return Promise.reject(new ApiError("action JSON 解析失败：" + e.message, { status: 0, code: "console_bad_json" }));
+        }
+        body.action = parsed;
+      }
+      return call("workflowTrigger", { body: body, headers: { "x-ppx-workflow-token": String(wfTokenIn.value).trim() } })
+        .then(function (r) { trigOut.appendChild(resultBox("触发结果", r)); return Promise.all([loadAccount(), loadStatus()]).then(function () { paintBar(); headWf.paint(); }); });
+    }, { tone: "pri", out: function () { return trigOut; } })));
+  trigS.body.appendChild(trigOut);
+
+  /* —— 投递 / 审批 / 审计 —— */
+  var delOut = h("div"), apprOut = h("div"), audOut = h("div");
+  logS.body.appendChild(h("div", { class: "row" },
+    btn("最近投递", function () {
+      return call("workflowDeliveries", { query: { limit: 100 } }).then(function (r) {
+        clear(delOut);
+        delOut.appendChild(tableOf([
+          { label: "时间", get: function (d) { return ago(d.created_at_ms); } },
+          { label: "事件", get: function (d) { return h("span", { class: "mono", text: d.event_type }); } },
+          { label: "订阅", get: function (d) { return h("span", { class: "mono", text: short(d.subscription_id, 10, 4) }); } },
+          { label: "状态", get: function (d) { return chip(d.status, d.status === "delivered" ? "g" : d.status === "abandoned" ? "b" : "w"); } },
+          { label: "尝试", get: function (d) { return String(d.attempts); } },
+          { label: "HTTP", get: function (d) { return d.last_status_code === null || d.last_status_code === undefined ? "—" : String(d.last_status_code); } },
+          { label: "错误", get: function (d) { return d.last_error || "—"; } }
+        ], r.deliveries || [], "（还没有投递记录）"));
+        return r;
+      });
+    }, { tone: "mini", out: function () { return delOut; } }),
+    btn("审批记录", function () {
+      return call("workflowApprovals").then(function (r) {
+        clear(apprOut);
+        apprOut.appendChild(tableOf([
+          { label: "时间", get: function (a) { return ago(a.created_at_ms); } },
+          { label: "联系人", get: function (a) { return "#" + a.contact_id; } },
+          { label: "标题", k: "title" },
+          { label: "摘要", get: function (a) { return h("span", { title: a.summary, text: short(a.summary, 40, 0) }); } },
+          { label: "状态", get: function (a) { return chip(a.status, a.status === "approved" ? "g" : a.status === "rejected" ? "b" : a.status === "pending" ? "w" : ""); } },
+          { label: "含 action", get: function (a) { return a.has_action ? chip("是", "i") : "—"; } },
+          { label: "决定来源", get: function (a) { return a.decision_source || "—"; } },
+          { label: "过期于", get: function (a) { return a.expires_at_ms ? localDate(a.expires_at_ms) : "—"; } }
+        ], r.approvals || [], "（还没有审批）"));
+        return r;
+      });
+    }, { tone: "mini", out: function () { return apprOut; } }),
+    btn("工作流审计", function () {
+      return call("workflowAudit", { query: { limit: 200 } }).then(function (r) {
+        clear(audOut); audOut.appendChild(auditTable(r.audit, "（还没有工作流审计）")); return r;
+      });
+    }, { tone: "mini gho", out: function () { return audOut; } })));
+  logS.body.appendChild(delOut);
+  logS.body.appendChild(apprOut);
+  logS.body.appendChild(audOut);
+
+  /* —— CardDAV —— */
+  var cdCfg = section("CardDAV 通讯录", "只按关键词现场查询，绝不整本缓存；返回字段受白名单限制，NOTE/ADR/BDAY 永远剥离");
+  host.appendChild(cdCfg.node);
+  var cdUrl = inp({ class: "in mono", placeholder: "https://cloud.example.com/remote.php/dav/addressbooks/users/team/" });
+  var cdUser = inp({ class: "in mono", placeholder: "用户名" });
+  var cdPass = inp({ class: "in mono", placeholder: "留空表示不修改已保存的密码", type: "password" });
+  var cdPrivate = chk("允许私网/本机地址", false);
+  var cdFields = inp({ class: "in mono", placeholder: "FN,ORG,TITLE,TEL,EMAIL,CATEGORIES" });
+  var cdCfgOut = h("div"), cdQueryOut = h("div"), cdAudOut = h("div");
+  cdCfg.body.appendChild(h("div", { class: "grid2" }, field("通讯录 URL", cdUrl), field("用户名", cdUser)));
+  cdCfg.body.appendChild(h("div", { class: "grid2", style: "margin-top:8px" }, field("密码", cdPass), field("字段白名单", cdFields, "逗号分隔；FORBIDDEN 字段（NOTE/ADR/BDAY 等）会被服务端拒绝")));
+  cdCfg.body.appendChild(h("div", { style: "margin-top:8px" }, cdPrivate.node));
+  cdCfg.body.appendChild(h("div", { class: "row", style: "margin-top:10px" },
+    btn("保存配置", function () {
+      var body = { url: cdUrl.value.trim(), username: cdUser.value.trim(), allow_private: cdPrivate.get(), field_allowlist: cdFields.value.trim() };
+      if (String(cdPass.value || "").trim()) body.password = String(cdPass.value);
+      return call("carddavConfigPut", { body: body }).then(function (r) {
+        cdCfgOut.appendChild(resultBox("CardDAV 配置", r)); cdPass.value = ""; return loadCdConfig();
+      });
+    }, { tone: "pri", out: function () { return cdCfgOut; } }),
+    btn("连通性探测", function () {
+      return call("carddavProbe", { body: {} }).then(function (r) { cdCfgOut.appendChild(resultBox("PROPFIND 探测", r)); return loadCdConfig(); });
+    }, { tone: "gho", out: function () { return cdCfgOut; } }),
+    btn("审计", function () {
+      return call("carddavAudit", { query: { limit: 200 } }).then(function (r) {
+        clear(cdAudOut); cdAudOut.appendChild(auditTable(r.audit, "（还没有 CardDAV 审计）")); return r;
+      });
+    }, { tone: "mini", out: function () { return cdAudOut; } })));
+  cdCfg.body.appendChild(cdCfgOut);
+  cdCfg.body.appendChild(cdAudOut);
+
+  var cdTerm = inp({ placeholder: "按姓名、组织、标签或工作联系方式搜索" });
+  var cdLimit = sel([[5, "5 条（上限）"], [3, "3 条"], [1, "1 条"]], { class: "in mini" });
+  var cdResults = h("div");
+  cdCfg.body.appendChild(h("h4", { class: "sub", text: "按关键词查询" }));
+  cdCfg.body.appendChild(h("div", { class: "row" }, cdTerm, cdLimit,
+    btn("查询", function () {
+      if (!String(cdTerm.value || "").trim()) { toast("需要关键词", "bad"); return Promise.reject(new ApiError("缺少关键词", { status: 0, code: "console_missing_term" })); }
+      return call("carddavQuery", { body: { term: String(cdTerm.value).trim(), limit: Number(cdLimit.value) } }).then(function (r) {
+        clear(cdResults);
+        cdResults.appendChild(h("p", { class: "hint", text: "返回 " + r.returned + " / 扫描 " + r.scanned + "，上限 " + r.cap }));
+        cdResults.appendChild(tableOf([
+          { label: "姓名", k: "display_name" },
+          { label: "字段", get: function (c) { return h("div", {}, (c.fields || []).map(function (f) { return h("div", { class: "mono", text: f.k + "：" + f.v }); })); } },
+          { label: "标签", get: function (c) { return (c.tags || []).length ? c.tags.join(" / ") : "—"; } }
+        ], r.results || [], "（没有匹配，或白名单只剩 FN）"));
+        cdQueryOut.appendChild(resultBox("原始响应", r));
+        return r;
+      });
+    }, { tone: "mini pri", out: function () { return cdQueryOut; } })));
+  cdCfg.body.appendChild(cdResults);
+  cdCfg.body.appendChild(cdQueryOut);
+
+  function loadCdConfig() {
+    return call("carddavConfig").then(function (r) {
+      var c = r.config || {};
+      if (!c.configured) { cdFields.value = "FN,ORG,TITLE,TEL,EMAIL,CATEGORIES"; return r; }
+      cdUrl.value = c.url || ""; cdUser.value = c.username || "";
+      cdPrivate.set(!!c.allow_private);
+      cdFields.value = (c.field_allowlist || []).join(",");
+      return r;
+    });
+  }
+
+  /* —— CalDAV —— */
+  var calCfg = section("CalDAV 日历", "只取时间窗内的忙闲区间；SUMMARY/DESCRIPTION/LOCATION/ATTENDEE 在解析时即丢弃，返回体里没有标题");
+  host.appendChild(calCfg.node);
+  var calUrl = inp({ class: "in mono", placeholder: "https://cloud.example.com/remote.php/dav/calendars/team/" });
+  var calUser = inp({ class: "in mono", placeholder: "用户名" });
+  var calPass = inp({ class: "in mono", placeholder: "留空表示不修改已保存的密码", type: "password" });
+  var calPrivate = chk("允许私网/本机地址", false);
+  var calCfgOut = h("div"), calFbOut = h("div"), calAudOut = h("div");
+  calCfg.body.appendChild(h("div", { class: "grid2" }, field("日历 URL", calUrl), field("用户名", calUser)));
+  calCfg.body.appendChild(h("div", { class: "grid2", style: "margin-top:8px" }, field("密码", calPass), ""));
+  calCfg.body.appendChild(h("div", { style: "margin-top:8px" }, calPrivate.node));
+  calCfg.body.appendChild(h("div", { class: "row", style: "margin-top:10px" },
+    btn("保存配置", function () {
+      var body = { url: calUrl.value.trim(), username: calUser.value.trim(), allow_private: calPrivate.get() };
+      if (String(calPass.value || "").trim()) body.password = String(calPass.value);
+      return call("caldavConfigPut", { body: body }).then(function (r) {
+        calCfgOut.appendChild(resultBox("CalDAV 配置", r)); calPass.value = ""; return loadCalConfig();
+      });
+    }, { tone: "pri", out: function () { return calCfgOut; } }),
+    btn("连通性探测", function () {
+      return call("caldavProbe", { body: {} }).then(function (r) { calCfgOut.appendChild(resultBox("PROPFIND 探测", r)); return loadCalConfig(); });
+    }, { tone: "gho", out: function () { return calCfgOut; } }),
+    btn("审计", function () {
+      return call("caldavAudit", { query: { limit: 200 } }).then(function (r) {
+        clear(calAudOut); calAudOut.appendChild(auditTable(r.audit, "（还没有 CalDAV 审计）")); return r;
+      });
+    }, { tone: "mini", out: function () { return calAudOut; } })));
+  calCfg.body.appendChild(calCfgOut);
+  calCfg.body.appendChild(calAudOut);
+
+  var now = new Date();
+  var dayStart = new Date(now.getTime() + 86400000);
+  var dayEnd = new Date(dayStart.getTime() + 86400000);
+  function isoLocal(d) {
+    var pad = function (v) { return (v < 10 ? "0" : "") + v; };
+    return d.getUTCFullYear() + "-" + pad(d.getUTCMonth() + 1) + "-" + pad(d.getUTCDate()) + "T" +
+      pad(d.getUTCHours()) + ":" + pad(d.getUTCMinutes()) + ":00Z";
+  }
+  var fbStart = inp({ class: "in mono", value: isoLocal(dayStart), placeholder: "2026-11-27T00:00:00Z" });
+  var fbEnd = inp({ class: "in mono", value: isoLocal(dayEnd), placeholder: "2026-11-28T00:00:00Z" });
+  var fbSlot = sel([[15, "15 分钟"], [30, "30 分钟"], [60, "60 分钟"]], { class: "in mini" });
+  var fbResults = h("div");
+  calCfg.body.appendChild(h("h4", { class: "sub", text: "忙闲查询" }));
+  calCfg.body.appendChild(h("div", { class: "grid2" }, field("开始（ISO-8601 UTC）", fbStart), field("结束", fbEnd, "窗口最多 31 天")));
+  calCfg.body.appendChild(h("div", { class: "row", style: "margin-top:8px" }, fbSlot,
+    btn("查询忙闲", function () {
+      return call("caldavFreebusy", { body: { start: String(fbStart.value || "").trim(), end: String(fbEnd.value || "").trim(), slot_minutes: Number(fbSlot.value) } }).then(function (r) {
+        clear(fbResults);
+        fbResults.appendChild(h("p", { class: "hint", text: "busy " + r.busy_count + " 段 · free " + r.free_count + " 格 · 保留事件 " + r.events_kept + " · 跳过 " + JSON.stringify(r.events_skipped || {}) }));
+        fbResults.appendChild(tableOf([
+          { label: "区间", k: "label" },
+          { label: "开始", get: function (s) { return h("span", { class: "mono", text: s.start }); } },
+          { label: "结束", get: function (s) { return h("span", { class: "mono", text: s.end }); } }
+        ], (r.busy || []).concat(r.free || []), "（窗口内没有忙闲数据）"));
+        calFbOut.appendChild(resultBox("原始响应", r));
+        return r;
+      });
+    }, { tone: "mini pri", out: function () { return calFbOut; } })));
+  calCfg.body.appendChild(fbResults);
+  calCfg.body.appendChild(calFbOut);
+
+  function loadCalConfig() {
+    return call("caldavConfig").then(function (r) {
+      var c = r.config || {};
+      if (!c.configured) return r;
+      calUrl.value = c.url || ""; calUser.value = c.username || "";
+      calPrivate.set(!!c.allow_private);
+      return r;
+    });
+  }
+
+  refreshSubs().catch(function (e) { renderError(subList, e); });
+  refreshTokens().catch(function (e) { renderError(tokList, e); });
+  loadCdConfig().catch(function (e) { renderError(cdCfgOut, e); });
+  loadCalConfig().catch(function (e) { renderError(calCfgOut, e); });
+};
+
+/* ======================================================================== *
+ * 6k2. 运维：出站队列、回调、设置、诊断
  * ======================================================================== */
 
 VIEWS.outbox = function (host) {

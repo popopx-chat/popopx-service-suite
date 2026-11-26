@@ -474,6 +474,135 @@ CREATE TABLE IF NOT EXISTS settings (
     value_json          TEXT NOT NULL,
     updated_at_ms       INTEGER NOT NULL
 );
+
+-- ───────────────────────── connector audit ───────────────────────────────
+-- One narrow row per webhook/DAV operation. There is deliberately no URL, body,
+-- contact text, token or exception-message column: the reason lives in `outcome`
+-- as a stable code, so an audit dump cannot become a second copy of the data it
+-- is meant to protect.
+CREATE TABLE IF NOT EXISTS connector_audit (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_ms               INTEGER NOT NULL,
+    connector           TEXT NOT NULL,
+    direction           TEXT NOT NULL CHECK (direction IN ('inbound','outbound')),
+    action              TEXT NOT NULL,
+    source              TEXT NOT NULL,
+    scope               TEXT,
+    status_code         INTEGER,
+    outcome             TEXT NOT NULL,
+    latency_ms          INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_connector_audit_connector ON connector_audit(connector, id DESC);
+
+-- ───────────────────────── workflow webhook bridge ──────────────────────
+-- A subscription is an operator-created destination. `secret` is the HMAC key
+-- the receiver verifies; it is never returned by a GET. `scopes` is a JSON array
+-- checked on every event, not a display hint.
+CREATE TABLE IF NOT EXISTS workflow_subscriptions (
+    id                  TEXT PRIMARY KEY,
+    label               TEXT NOT NULL,
+    url                 TEXT NOT NULL,
+    secret              TEXT NOT NULL,
+    scopes              TEXT NOT NULL,
+    allow_private       INTEGER NOT NULL DEFAULT 0,
+    active              INTEGER NOT NULL DEFAULT 1,
+    created_at_ms       INTEGER NOT NULL,
+    updated_at_ms       INTEGER NOT NULL,
+    last_attempt_ms     INTEGER,
+    last_success_ms     INTEGER,
+    last_error          TEXT,
+    failures            INTEGER NOT NULL DEFAULT 0,
+    next_attempt_ms     INTEGER
+);
+
+-- The delivery queue has to retain the event body until the receiver accepts it,
+-- which is why the body is bounded at the source and the row is pruned after 30
+-- days. `UNIQUE (subscription_id, event_id)` makes a replayed inbound event
+-- idempotent. `status` is one of pending/delivered/abandoned; there is no
+-- 'failed' terminal state because the next attempt is always scheduled.
+CREATE TABLE IF NOT EXISTS workflow_deliveries (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    subscription_id     TEXT NOT NULL REFERENCES workflow_subscriptions(id) ON DELETE CASCADE,
+    event_id            TEXT NOT NULL,
+    event_type          TEXT NOT NULL,
+    payload_json        TEXT NOT NULL,
+    status              TEXT NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending','delivered','abandoned')),
+    attempts            INTEGER NOT NULL DEFAULT 0,
+    next_attempt_ms     INTEGER NOT NULL,
+    last_status_code    INTEGER,
+    last_error          TEXT,
+    created_at_ms       INTEGER NOT NULL,
+    delivered_at_ms     INTEGER,
+    UNIQUE (subscription_id, event_id)
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_deliveries_due
+    ON workflow_deliveries(status, next_attempt_ms);
+
+-- Inbound credentials: `token_hash` is SHA-256 hex, `token_prefix` is the only
+-- part the console redisplay shows. Revocation is a column, not a delete, so an
+-- old audit row still has something to point at.
+CREATE TABLE IF NOT EXISTS workflow_tokens (
+    id                  TEXT PRIMARY KEY,
+    label               TEXT NOT NULL,
+    token_hash          TEXT NOT NULL UNIQUE,
+    token_prefix        TEXT NOT NULL,
+    scopes              TEXT NOT NULL,
+    created_at_ms       INTEGER NOT NULL,
+    expires_at_ms       INTEGER,
+    revoked             INTEGER NOT NULL DEFAULT 0,
+    revoked_at_ms       INTEGER,
+    last_used_at_ms     INTEGER
+);
+
+-- The approval row is the audit trail of a human decision, so a failed delivery
+-- leaves a row with status='failed' rather than deleting it. `action_json` is
+-- returned to the workflow engine only after the recipient decides; the gateway
+-- never executes it.
+CREATE TABLE IF NOT EXISTS workflow_approvals (
+    id                  TEXT PRIMARY KEY,
+    token_id            TEXT NOT NULL,
+    contact_id          INTEGER NOT NULL REFERENCES contacts(contact_id) ON DELETE CASCADE,
+    title               TEXT NOT NULL,
+    summary             TEXT NOT NULL,
+    action_json         TEXT,
+    status              TEXT NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending','approved','rejected','expired','failed','cancelled')),
+    card_id             TEXT,
+    created_at_ms       INTEGER NOT NULL,
+    expires_at_ms       INTEGER NOT NULL,
+    decided_at_ms       INTEGER,
+    decision_source     TEXT
+);
+
+-- Trigger idempotency: a request_id is honoured once per token for seven days.
+-- The cached response is the same JSON the caller received, so a retry cannot
+-- create a second card.
+CREATE TABLE IF NOT EXISTS workflow_triggers (
+    request_key         TEXT PRIMARY KEY,
+    token_id            TEXT NOT NULL,
+    response_json       TEXT NOT NULL,
+    status_code         INTEGER NOT NULL,
+    created_at_ms       INTEGER NOT NULL
+);
+
+-- ───────────────────────── DAV endpoints ────────────────────────────────
+-- One row per connector. `password` is a DAV app password, never a user's
+-- primary password; the console returns only `password_set`. `field_allowlist`
+-- is the CardDAV allowlist JSON; CalDAV leaves it empty because it never returns
+-- an event field.
+CREATE TABLE IF NOT EXISTS dav_endpoints (
+    connector           TEXT PRIMARY KEY CHECK (connector IN ('carddav','caldav')),
+    url                 TEXT NOT NULL,
+    username            TEXT NOT NULL DEFAULT '',
+    password            TEXT NOT NULL DEFAULT '',
+    allow_private       INTEGER NOT NULL DEFAULT 0,
+    field_allowlist     TEXT NOT NULL DEFAULT '',
+    updated_at_ms       INTEGER NOT NULL,
+    last_probe_ms       INTEGER,
+    last_probe_status   INTEGER,
+    last_probe_error    TEXT
+);
 """
 
 

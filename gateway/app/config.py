@@ -253,6 +253,9 @@ class PluginToggles:
     privacy_sso: bool = True
     polls: bool = True
     web3_bridge: bool = False
+    workflow_webhook: bool = False
+    carddav_connector: bool = False
+    caldav_connector: bool = False
 
     @property
     def enabled(self) -> List[str]:
@@ -264,6 +267,9 @@ class PluginToggles:
                 ("privacy_sso", self.privacy_sso),
                 ("polls", self.polls),
                 ("web3_bridge", self.web3_bridge),
+                ("workflow_webhook", self.workflow_webhook),
+                ("carddav_connector", self.carddav_connector),
+                ("caldav_connector", self.caldav_connector),
             )
             if on
         ]
@@ -299,6 +305,9 @@ class BillingConfig:
     per_sso_login: int = 1
     per_poll: int = 1
     per_web3_event: int = 1
+    per_workflow_event: int = 1
+    per_carddav_query: int = 1
+    per_caldav_query: int = 1
 
 
 @dataclass
@@ -429,6 +438,9 @@ def load_config(env_path: Optional[Path] = None) -> Config:
         per_sso_login=_as_int(source, _CP_KEYS["sso"], 1, minimum=0),
         per_poll=_as_int(source, _CP_KEYS["poll"], 1, minimum=0),
         per_web3_event=_as_int(source, _CP_KEYS["web3"], 1, minimum=0),
+        per_workflow_event=_as_int(source, _CP_KEYS["workflow"], 1, minimum=0),
+        per_carddav_query=_as_int(source, _CP_KEYS["carddav"], 1, minimum=0),
+        per_caldav_query=_as_int(source, _CP_KEYS["caldav"], 1, minimum=0),
     )
     if billing.require_voucher and billing.official_ed25519_public_key is None:
         raise ConfigError(
@@ -443,6 +455,9 @@ def load_config(env_path: Optional[Path] = None) -> Config:
         privacy_sso=_as_bool(source, _ENV_PREFIX + "PLUGIN_PRIVACY_SSO", True),
         polls=_as_bool(source, _ENV_PREFIX + "PLUGIN_POLLS", True),
         web3_bridge=_as_bool(source, _ENV_PREFIX + "PLUGIN_WEB3_BRIDGE", False),
+        workflow_webhook=_as_bool(source, _ENV_PREFIX + "PLUGIN_WORKFLOW_WEBHOOK", False),
+        carddav_connector=_as_bool(source, _ENV_PREFIX + "PLUGIN_CARDDAV_CONNECTOR", False),
+        caldav_connector=_as_bool(source, _ENV_PREFIX + "PLUGIN_CALDAV_CONNECTOR", False),
     )
 
     alert_min_severity = _as_str(source, _ENV_PREFIX + "ALERT_MIN_SEVERITY", "warning").lower()
@@ -518,14 +533,17 @@ def load_config(env_path: Optional[Path] = None) -> Config:
 
 
 #: The per-action meter keys, spelled once. A dict rather than literals at the
-#: call sites because these five names have to agree with `.env.example`, and a
-#: typo in one of them is a plugin that silently bills nothing.
+#: call sites because these names have to agree with `.env.example`, and a typo
+#: in one of them is a plugin that silently bills nothing.
 _CP_KEYS = {
     "ai": _ENV_PREFIX + "CP_PER_AI_MESSAGE",
     "alert": _ENV_PREFIX + "CP_PER_ALERT",
     "sso": _ENV_PREFIX + "CP_PER_SSO_LOGIN",
     "poll": _ENV_PREFIX + "CP_PER_POLL",
     "web3": _ENV_PREFIX + "CP_PER_WEB3_EVENT",
+    "workflow": _ENV_PREFIX + "CP_PER_WORKFLOW_EVENT",
+    "carddav": _ENV_PREFIX + "CP_PER_CARDDAV_QUERY",
+    "caldav": _ENV_PREFIX + "CP_PER_CALDAV_QUERY",
 }
 
 
@@ -808,10 +826,11 @@ def self_test() -> List[str]:
     toggles = load({"POPOPX_PLUGIN_WEB3_BRIDGE": "1"})
     check("web3_bridge_is_off_until_an_operator_turns_it_on", three_lines.plugins.web3_bridge is False and toggles.plugins.web3_bridge is True)
     check("the_enabled_list_is_the_on_ones_in_declaration_order", three_lines.plugins.enabled == ["ai_agent", "alert_ops", "privacy_sso", "polls"])
-    for plugin in ("ai_agent", "alert_ops", "privacy_sso", "polls", "web3_bridge"):
+    check("the_three_connectors_start_off", not (three_lines.plugins.workflow_webhook or three_lines.plugins.carddav_connector or three_lines.plugins.caldav_connector))
+    for plugin in ("ai_agent", "alert_ops", "privacy_sso", "polls", "web3_bridge", "workflow_webhook", "carddav_connector", "caldav_connector"):
         name = "switching_off_%s_removes_it_from_the_enabled_list" % plugin
         check(name, plugin not in load({"POPOPX_PLUGIN_" + plugin.upper(): "0"}).plugins.enabled)
-    check("every_plugin_toggle_is_a_named_field", {f.name for f in dataclasses.fields(PluginToggles)} == {"ai_agent", "alert_ops", "privacy_sso", "polls", "web3_bridge"})
+    check("every_plugin_toggle_is_a_named_field", {f.name for f in dataclasses.fields(PluginToggles)} == {"ai_agent", "alert_ops", "privacy_sso", "polls", "web3_bridge", "workflow_webhook", "carddav_connector", "caldav_connector"})
 
     # ── 8. vocabularies, keywords and the bounds a typo would breach ────────
     check("alert_min_severity_is_case_insensitive", load({"POPOPX_ALERT_MIN_SEVERITY": "CRITICAL"}).alert_min_severity == "critical")
@@ -845,7 +864,7 @@ def self_test() -> List[str]:
     check("the_service_identity_defaults_are_the_paired_account", three_lines.service_name == "POPOPX 服务号" and three_lines.service_full_name == "POPOPX Service Account" and three_lines.service_id == "popopx.official")
     check("the_ai_defaults_are_a_hosted_model_and_a_restraint", three_lines.ai_model == "gpt-4o-mini" and three_lines.ai_max_tokens == 512 and "不索要任何个人身份信息" in three_lines.ai_system_prompt)
     check("the_public_rpc_defaults_are_two_chain_endpoints", three_lines.web3_evm_rpc_url == "https://eth.llamarpc.com" and three_lines.web3_solana_rpc_url == "https://api.mainnet-beta.solana.com")
-    check("the_meter_defaults_match_the_published_price_list", [three_lines.billing.per_card, three_lines.billing.per_menu_push, three_lines.billing.per_key_rotation, three_lines.billing.per_ai_message, three_lines.billing.per_alert, three_lines.billing.per_sso_login, three_lines.billing.per_poll, three_lines.billing.per_web3_event] == [1, 1, 2, 5, 2, 1, 1, 1])
+    check("the_meter_defaults_match_the_published_price_list", [three_lines.billing.per_card, three_lines.billing.per_menu_push, three_lines.billing.per_key_rotation, three_lines.billing.per_ai_message, three_lines.billing.per_alert, three_lines.billing.per_sso_login, three_lines.billing.per_poll, three_lines.billing.per_web3_event, three_lines.billing.per_workflow_event, three_lines.billing.per_carddav_query, three_lines.billing.per_caldav_query] == [1, 1, 2, 5, 2, 1, 1, 1, 1, 1, 1])
     check("sso_defaults_are_a_three_minute_login", three_lines.sso_ttl_seconds == 180 and three_lines.sso_poll_interval_ms == 2000)
 
     # ── 10. warnings: the settings that run, but not as the operator means ──

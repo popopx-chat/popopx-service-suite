@@ -158,8 +158,8 @@ REASON_OPERATOR = "operator:"
 
 #: The meter table: billing-facing action name -> attribute on
 #: :class:`app.config.BillingConfig`. The action names are the config field
-#: names with ``per_`` dropped, which is the only rule that keeps eight call
-#: sites, ``.env.example`` and the console honest at once. Plugins pass these
+#: names with ``per_`` dropped, which is the only rule that keeps every call
+#: site, ``.env.example`` and the console honest at once. Plugins pass these
 #: strings to :meth:`BillingService.charge`; they are not free text.
 METER_ACTIONS: Tuple[Tuple[str, str], ...] = (
     ("card", "per_card"),
@@ -170,6 +170,9 @@ METER_ACTIONS: Tuple[Tuple[str, str], ...] = (
     ("sso_login", "per_sso_login"),
     ("poll", "per_poll"),
     ("web3_event", "per_web3_event"),
+    ("workflow_event", "per_workflow_event"),
+    ("carddav_query", "per_carddav_query"),
+    ("caldav_query", "per_caldav_query"),
 )
 
 #: Which plugin toggle each meter pays for. The first three meters in
@@ -183,6 +186,9 @@ METERED_PLUGINS: Tuple[Tuple[str, str], ...] = (
     ("privacy_sso", "sso_login"),
     ("polls", "poll"),
     ("web3_bridge", "web3_event"),
+    ("workflow_webhook", "workflow_event"),
+    ("carddav_connector", "carddav_query"),
+    ("caldav_connector", "caldav_query"),
 )
 
 #: Hard cap on :meth:`BillingService.ledger`; the console renders a page, and a
@@ -1671,7 +1677,7 @@ def self_test() -> List[str]:
 
         # ── meters ───────────────────────────────────────────────────────────
         prices = svc.meters()
-        check("the_meter_table_is_the_eight_named_actions", set(prices) == {action for action, _ in METER_ACTIONS})
+        check("the_meter_table_is_the_eleven_named_actions", set(prices) == {action for action, _ in METER_ACTIONS})
         check("meters_come_from_the_config_not_a_literal", prices["card"] == svc.config.billing.per_card)
         for action, attr in METER_ACTIONS:
             probe = new_config(meters={action: 3}, name="probe")
@@ -1686,7 +1692,7 @@ def self_test() -> List[str]:
         check("a_free_action_is_still_recorded", priced.db.scalar("SELECT COUNT(*) FROM billing_ledger WHERE kind = 'consume' AND amount = 0") == 1)
         check("a_free_action_moves_no_money", free.charged == 0 and free.balance_after == 100)
         check("a_free_action_appears_in_the_console_as_free", "alert" in priced.summary()["free_meters"])
-        check("the_plugin_meters_are_exactly_five", len(priced.summary()["plugin_meters"]) == len(METERED_PLUGINS) == 5)
+        check("the_plugin_meters_are_exactly_eight", len(priced.summary()["plugin_meters"]) == len(METERED_PLUGINS) == 8)
         afford, _ = new_service(new_config(threshold=5, name="afford"), name="afford")
         activate(afford, 7)
         check("an_account_with_room_can_afford", afford.can_afford("card") is True)

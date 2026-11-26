@@ -6,9 +6,13 @@
 
 中文 · English：[`README.en.md`](README.en.md)
 
-POPOPX 服务号的后端套件：网关（FastAPI）、计费（POPX-CP）、频道信封加密、五个业务插件，
+POPOPX 服务号的后端套件：网关（FastAPI）、计费（POPX-CP）、频道信封加密、八个业务插件，
 以及一个浏览器管理后台。协议与随包的 POPOPX iOS 客户端逐字节对齐；开源节点只通过
 `ws://127.0.0.1:5225` 连接，本套件不链接、不修改、也不重新分发它的任何代码。
+
+其中三个连接器面向自建办公栈：`workflow_webhook` 把事件以 HMAC-SHA256 签名推给
+Node-RED / Activepieces，并把入站动作强制转成人工确认卡片；`carddav_connector` 与
+`caldav_connector` 只按关键词/时间窗现场查询，返回前剥离私密联系字段与会议标题。
 
 ## 协议与商标
 
@@ -41,6 +45,7 @@ popopx-service-suite/
     ├── requirements.txt     fastapi / uvicorn / pydantic / cryptography / httpx / qrcode / websockets
     └── app/                 config database billing_service crypto_service agent_bridge main
         ├── plugins/         ai_agent alert_ops privacy_sso polls web3_bridge
+        │                    workflow_webhook carddav_connector caldav_connector
         └── static/          index.html 管理后台
 ```
 
@@ -51,8 +56,8 @@ popopx-service-suite/
 - 起服务要 Python 3.11 加 `gateway/requirements.txt` 里的 wheel。没装这些 wheel 的机器上并
   没有「降级 HTTP 路径」这回事：`create_app()` 直接抛 `RuntimeError: FastAPI is not installed;
   run ./start_macos.sh, ./install_macos.sh or ./install_ubuntu22.sh first`（后面拼 `ImportError` 原文，见
-  `gateway/app/main.py:3092`）。这种机器能做的是跑 14 组自检里的 12 组——运行器会把依赖那两个
-  wheel 的组点名 `SKIPPED`。下面「自检」里的 **2290 条 / 12 组** 就是这么来的，它不是一台正在
+  `gateway/app/main.py:3109`）。这种机器能做的是跑 18 组自检里的 16 组——运行器会把依赖那两个
+  wheel 的组点名 `SKIPPED`。下面「自检」里的 **2489 条 / 16 组** 就是这么来的，它不是一台正在
   应答的网关。
 - 需要一个正在运行的 `popopx-agent` / `popopx-chat` 节点，它的 WebSocket 控制口在
   `127.0.0.1:5225`。没有节点也能起服务，见下面「启动行为与插件开关」。
@@ -145,7 +150,7 @@ Crashed=true}`、`RestartSec=3`→`ThrottleInterval=3`（那是最短间隔的�
 本机离线实测到的：`--help`、`--check`、`--dry-run`（含 `--with-node`）全部退出 0，两个 plist
 `plutil -lint` 通过，dry-run 里"已存在的 env 逐字节不变、只多一个 `.bak.<utc>`"这条由 cksum 现场
 证明；`brew` 装的 Python 3.11.18 过了版本门，用它按 `gateway/requirements.txt` 实装依赖建一个 venv，
-`--self-test` 实测 **2324 条 / 14 组、exit 0**（这一跑顺手揪出一个只在新版 starlette 上失明的 HTTP
+`--self-test` 实测 **2523 条 / 18 组、exit 0**（这一跑顺手揪出一个只在新版 starlette 上失明的 HTTP
 量具，见「自检」）。
 
 带 sudo 的真装真起 **2026-11-22 在这台 Mac 上跑过了**：`/Library/LaunchDaemons/com.popopx.gateway.plist`
@@ -228,9 +233,41 @@ NEXT STEPS：把 `POPOPX_PUBLIC_BASE_URL` 设成手机真正加载的那个 http
 
 节点在启动那一刻没起来不是致命错误：网关照常开始服务，`/healthz` 报
 `node_connected: false`，桥接层按封顶的退避一直重试，节点起来后自己接上（`strict=True`
-留给需要 fail-fast 的调用方）。五个插件里只有 `web3_bridge` 默认关闭，需要
-`POPOPX_PLUGIN_WEB3_BRIDGE=1`；其余四个跟着 `POPOPX_PLUGIN_*` 打开。每个插件在自己的
-挂载前缀下答 `GET <prefix>/status`，控制台五个面板读的就是这一条。
+留给需要 fail-fast 的调用方）。`ai_agent`、`alert_ops`、`privacy_sso`、`polls` 默认开启；
+`web3_bridge` 与三个连接器（`workflow_webhook`、`carddav_connector`、`caldav_connector`）
+默认关闭，各自跟着自己的 `POPOPX_PLUGIN_*` 打开。三个连接器还要求先在控制台配置好
+订阅/签名密钥或 DAV 端点：未配置时 `/status` 报 `configured: false`、查询返回
+`409 not_configured`，不会静默外联。每个插件在自己的挂载前缀下答 `GET <prefix>/status`，
+控制台八个面板读的就是这一条。
+
+## 开放工作流与 DAV 连接器
+
+三个连接器都默认关闭，且都要求先配置再使用；控制台的「工作流与 DAV」面板是它们的管理入口。
+
+**`workflow_webhook`（Node-RED / Activepieces）**
+- 出站：控制台创建订阅时生成独立签名密钥（只显示一次）；每次投递带
+  `X-PPX-Timestamp` 与 `X-PPX-Signature: sha256=<hex>`，签名串是
+  `timestamp + "." + body`；只发送订阅勾选的事件 scope。公网目标必须 HTTPS，
+  元数据地址（`169.254.169.254` 等）永远拒绝，私网/回环要显式 `allow_private`；
+  连续失败按指数退避并在 8 次后熔断 15 分钟。
+- 入站：`POST /api/v1/workflows/trigger`，请求头 `X-PPX-Workflow-Token`；令牌有有效期、
+  可一键撤销、按 `message.send` / `approval.request` 分 scope。请求里只要带 `action`
+  （或 `approval.action`），无论 `kind` 写什么都会强制变成人工确认卡片，审批通过后
+  才把动作作为 `approval.decided` 事件发回订阅方。
+- 脱敏审计：进出站、订阅/令牌操作都写 `connector_audit`，只有时间、方向、动作、
+  来源、scope、状态码、结果与耗时，不存 URL、正文或密钥。
+
+**`carddav_connector`（通讯录）**
+- `POST /api/v1/plugins/carddav/query` 只接受关键词，单次最多 5 条；不做整本缓存。
+  返回字段受白名单限制（默认 `FN,ORG,TITLE,TEL,EMAIL,CATEGORIES`），`NOTE`、`ADR`、
+  `BDAY`、`PHOTO` 等私密字段在解析时剥离，家庭电话/邮箱不因白名单而泄漏。
+- `PUT /api/v1/plugins/carddav/config` 保存端点与白名单；`POST .../probe` 做一次
+  CardDAV `PROPFIND`。
+
+**`caldav_connector`（日历）**
+- `POST /api/v1/plugins/caldav/freebusy` 取时间窗内的忙闲；`SUMMARY`、`DESCRIPTION`、
+  `LOCATION`、`ATTENDEE`、`ORGANIZER` 在解析时即丢弃，返回体只有 `busy`/`free` 区间
+  与 `可预约` 标签；窗口最多 31 天、slot 15–240 分钟。
 
 ## 使用示例
 
@@ -261,7 +298,7 @@ curl -s -X POST $API/api/v1/send/text -H "X-Admin-Token: $TOKEN" \
 # 4. 轮换付费频道密钥：epoch 自增，信封用频道 Ed25519 私钥签名
 curl -s -X POST "$API/api/v1/channels/$CHANNEL_ID/rotate" -H "X-Admin-Token: $TOKEN"
 
-# 5. 插件状态（控制台五个面板读的就是这一条）
+# 5. 插件状态（控制台八个面板读的就是这一条）
 curl -s $API/api/v1/plugins -H "X-Admin-Token: $TOKEN"
 curl -s $API/api/v1/plugins/alert_ops/status -H "X-Admin-Token: $TOKEN"
 ```
@@ -274,20 +311,22 @@ curl -s $API/api/v1/plugins/alert_ops/status -H "X-Admin-Token: $TOKEN"
 
 ## 接口一览
 
-91 条路由。本文件声明的 52 条由 `python3 -m app.main --print-routes` 打印，同一条命令顺手断言
-"每条管理路由都被 token 盖住"；五个插件另贡献 39 条（`alert_ops` 10、`web3_bridge` 9、
-`polls` 8、`ai_agent` 6、`privacy_sso` 6），它们走 `include_router` 进来，`--print-routes` 看不见，
+116 条路由。本文件声明的 53 条由 `python3 -m app.main --print-routes` 打印，同一条命令顺手断言
+"每条管理路由都被 token 盖住"；八个插件另贡献 63 条（`workflow_webhook` 12、`alert_ops` 10、
+`web3_bridge` 9、`polls` 8、`ai_agent` 6、`privacy_sso` 6、`carddav_connector` 6、
+`caldav_connector` 6），它们走 `include_router` 进来，`--print-routes` 看不见，
 所以自检里有 `every_plugin_*` 与逐插件的 `plugin_<id>_answers_status_at_its_own_prefix` 补上另一半。
 
 鉴权只有一条规则：`/api/v1/*` 要 `X-Admin-Token`，也收 `?token=`；缺失或不对一律
 `401 {"ok":false,"error":"unauthorized"}`。但请求头名并不统一：核心 `admin_required` 与插件
-中间件 `plugin_auth` 都只读 `x-admin-token` 或 `?token=`（`gateway/app/main.py:3170`、`:3254`），
+中间件 `plugin_auth` 都只读 `x-admin-token` 或 `?token=`（`gateway/app/main.py:3185`、`:3266`），
 不解析 `Authorization: Bearer`——全套件只有 `privacy_sso` 的设备侧路由读它
 （`privacy_sso_plugin.py:1521` `bearer_secret`），`alert_ops` 的控制台路由读
 `X-Popopx-Admin-Token`（`alert_ops_plugin.py:1105`）。管理后台三个头一起发
-（`gateway/app/static/index.html:585`–`:587`），一个令牌不用按路由切换。四类例外：
+（`gateway/app/static/index.html:620`–`:622`），一个令牌不用按路由切换。五类例外：
 `/`、`/healthz`、`/h5/{article_id}` 公开；
-`POST /api/v1/verifyH5Auth` 靠手机侧的 HMAC 签名证明调用者；插件路径以 `/webhook`、`/verify`、
+`POST /api/v1/verifyH5Auth` 靠手机侧的 HMAC 签名证明调用者；`POST /api/v1/workflows/trigger`
+只认 `X-PPX-Workflow-Token`（带过期、可撤销、按 scope 拒绝），管理令牌对它是无意义的；插件路径以 `/webhook`、`/verify`、
 `/callback` 结尾的不问 token（它们各自有 per-source token 或背靠背调用方）；
 `GET /api/v1/plugins/sso/sessions/{id}` 也免 token——扫码页要能在拿到登录态之前轮询它。
 
@@ -309,7 +348,7 @@ broker 超时……`node_error` 里就是原因），只有 `node_unreachable` �
 
 ## 配置
 
-全部配置项在根目录的 [`.env.example`](.env.example)（48 个键，每个都有注释；用
+全部配置项在根目录的 [`.env.example`](.env.example)（54 个键，每个都有注释；用
 `grep -cE '^[A-Z0-9_]+=' .env.example` 能数出同一个数），
 `cp .env.example .env` 之后改它。查找顺序是 `--env <path>` → `$POPOPX_ENV_FILE` →
 仓库根目录的 `.env`；进程环境覆盖文件里的同名键（编排器说的算）。
@@ -332,7 +371,7 @@ macOS 在 `/usr/local/etc/popopx-service-suite/env`——launchd 没有 `Environ
 
 ## 自检
 
-每个模块都自带 `self_test()`，共 14 组，用下面这条命令一次性跑完：
+每个模块都自带 `self_test()`，共 18 组，用下面这条命令一次性跑完：
 
 ```bash
 # 两个代码块都从仓库根目录起跑
@@ -343,15 +382,17 @@ cd gateway && python3 -m app.main --self-test
 token 盖住的_admin 路由就不该开始监听），完整套件是开发/发布前的入口，三条命令分别由
 `start_macos.sh`、`install_macos.sh` 与 `install_ubuntu22.sh` 在最后一步打印出来供复制。
 
-权威计数是这条命令自己打出来的最后一行。本机 2026-11-22 用 `/usr/bin/python3` 跑只有标准库那一档
-（`cryptography` 和 `fastapi` 都没装），实测是 **2290 条 / 12 组**：`app.crypto_service.crypto_self_test`（缺 `cryptography`）和
+权威计数是这条命令自己打出来的最后一行。本机 2026-11-26 用 `/usr/bin/python3` 跑只有标准库那一档
+（`cryptography` 和 `fastapi` 都没装），实测是 **2489 条 / 16 组**：`app.crypto_service.crypto_self_test`（缺 `cryptography`）和
 `app.main.http_self_test`（缺 `fastapi`）两组被运行器点名 `SKIPPED`，并打印 "those paths are NOT
 verified here"——这两组在本机一条都没跑过，不是"跑过了没记上"。同一台机器上换一个装了
-`gateway/requirements.txt` 的 venv 再跑，实测 **2324 条 / 14 组**，多出来的正是那两组：运行器逐组打印
-`crypto_self_test 6 checks` 与 `http_self_test 28 checks`，14 组之和恰好等于总行
-（2290 + 6 + 28 = 2324），所以你机器上那一行也能这样拆开对账。上面每一档都在 2026-11-22 重测过：
+`gateway/requirements.txt` 的 venv 再跑，实测 **2523 条 / 18 组**，多出来的正是那两组：运行器逐组打印
+`crypto_self_test 6 checks` 与 `http_self_test 28 checks`，18 组之和恰好等于总行
+（2489 + 6 + 28 = 2523），所以你机器上那一行也能这样拆开对账。上面每一档都在 2026-11-26 重测过：
 仓库 `.venv` 的 3.9.6（fastapi 0.128.8）与 `brew` 装的 3.11.18 各建一个 venv，两边同为
-**2324 条 / 14 组、exit 0**。后一次不是重复劳动：`requirements.txt`
+**2523 条 / 18 组、exit 0**。新增的四组是 `app.connectors`（34）、`workflow_webhook_plugin`
+（52）、`carddav_connector`（43）、`caldav_connector`（48）；它们把 HMAC/SSRF、令牌过期与
+撤销、vCard 敏感字段剥离、CalDAV 标题零泄漏都放进了可执行断言。后一次不是重复劳动：`requirements.txt`
 钉的是区间，新 venv 因此拿到 fastapi 0.165.0 + starlette 1.10.0，而 starlette 1.x 的
 `include_router` 不再把插件路由摊平进 `app.routes`（改成挂一个嵌套的 `_IncludedRouter`），HTTP 组
 按 `isinstance(r, APIRoute)` 读一遍就少了 30 条插件路由、报出 39 个 verb+path「声明了却没装上」。
@@ -366,14 +407,14 @@ verified here"——这两组在本机一条都没跑过，不是"跑过了没�
 监听口、回非 HTTP 字节，让库自己决定异常类；最后一条直接断言 `start()` 兜底的类清单和装没装
 `websockets` 一致——缺 wheel 那档断言的是三元回退表，不是"跳过"，所以它不会在测不到的配置里悄悄为真。
 
-断言分布在：协议层、数据库、配置、计费、密码学、节点桥、五个插件、跨实现密码学、以及 HTTP 组
+断言分布在：协议层、数据库、配置、计费、密码学、节点桥、八个插件、跨实现密码学、以及 HTTP 组
 `app.main.http_self_test`——最后一组真的向 ASGI 应用发请求，所以它能证明一个路由是被装上了还是只是写在源码里。
 
 ```bash
 # 同样从仓库根目录（跑过上一块就先 cd ..）
 python3.11 -m venv .venv                      # 3.11 是这套件的目标解释器，见 requirements.txt 头几行
 .venv/bin/pip install -r gateway/requirements.txt
-cd gateway && ../.venv/bin/python -m app.main --self-test   # 14 组全绿、无 SKIPPED（本机实测 2324 条）
+cd gateway && ../.venv/bin/python -m app.main --self-test   # 18 组全绿、无 SKIPPED（本机实测 2523 条）
 ```
 
 ## 跨实现密码学校验
@@ -403,7 +444,7 @@ cd gateway && python3 ../official_tools/gen_voucher.py --help
 ```
 
 默认 `POPOPX_BILLING_REQUIRE_VOUCHER=0`：账户一建行就是 `ONLINE`，四个默认开启的插件开箱可用
-（`web3_bridge` 默认关闭，要 `POPOPX_PLUGIN_WEB3_BRIDGE=1`，见上文），不需要向任何一方兑换激活码；计量照记、流水照平、控制台照看，所以配额数据是真的。
+（`web3_bridge` 与三个连接器默认关闭，见上文），不需要向任何一方兑换激活码；计量照记、流水照平、控制台照看，所以配额数据是真的。
 把它设成 `1` 才回到准入模式：账户起始 `DRAFT`，未兑换的计量动作一律 409 `account_draft`，
 此时 `POPOPX_OFFICIAL_ED25519_PUBLIC_KEY` 变成启动必需项。私钥只在铸造机上，
 网关只用公钥离线验签，因此它无法造码。余额耗尽时插件会被熔断（`GateDecision`），

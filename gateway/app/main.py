@@ -95,7 +95,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Mapping,
 # parameter's type, which makes the parameter a required *query* field — so all 50
 # core admin endpoints answered ``422 {"loc": ["query", "request"]}`` before
 # ``admin_required(request)`` ran. Measured against the live router, not inferred:
-# ``GET /api/v1/status`` was the first call to show it. The five plugins were never
+# ``GET /api/v1/status`` was the first call to show it. The plugin modules were never
 # affected because their handlers are declared in modules where the same name is
 # resolved differently; :func:`unresolvable_route_annotations` is what keeps this
 # file honest about it on a machine with no FastAPI installed.
@@ -2190,9 +2190,25 @@ class InboundRouter:
                 return
             outcome = await handler(message, callback)
             self._update(row_id, outcome[0], handler=outcome[1], error=outcome[2])
+            self._observe_workflow(message, outcome[0])
         except Exception as exc:  # noqa: BLE001 — a handler bug must not cost the reader task
             LOG.exception("inbound handler failed for contact %d", contact_id)
             self._update(row_id, "error", handler=None, error="%s: %s" % (type(exc).__name__, exc))
+
+    def _observe_workflow(self, message: InboundMessage, outcome: str) -> None:
+        """Fan a follower's message out to the workflow bridge, after it was routed.
+
+        Deliberately after the gateway/plugin handlers and outside their return
+        value: a Node-RED receiver being down must not turn a poll vote or an
+        alert acknowledge into an error the follower sees. The module owns its
+        own failure logging and audit rows.
+        """
+        mounted = self.plugins.get("workflow_webhook")
+        if mounted is None or not mounted.available or mounted.deps is None:
+            return
+        observer = getattr(mounted.module, "observe_inbound", None)
+        if observer is not None:
+            observer(mounted.deps, message, outcome)
 
     async def on_event(self, tag: str, body: Mapping[str, Any]) -> None:
         """Node events: only a contact request can usefully be acted on.
@@ -3130,7 +3146,7 @@ def create_app(config: Optional[Config] = None, *, gateway: Optional[Gateway] = 
     # do not define one, which is what it is for.
     for mounted in gw.plugins.values():
         if mounted.available and mounted.router is not None:
-            # The prefix is conditional because the five plugins do not agree on who
+            # The prefix is conditional because the eight plugins do not agree on who
             # supplies it, and passing it unconditionally composes two copies:
             # `alert_ops`, `polls` and `web3_bridge` declare their router with
             # `prefix=deps.spec.url_prefix` so that the module answers at its real
@@ -3297,6 +3313,31 @@ def create_app(config: Optional[Config] = None, *, gateway: Optional[Gateway] = 
         signature = body.get("sig") or body.get("signature") or query.get(H5_SIG_PARAM) or ""
         result = gw.eco.verify_h5_request(uid, timestamp, signature)
         return JSONResponse(result, status_code=200 if result.get("valid") else 401)
+
+    @app.post("/api/v1/workflows/trigger")
+    async def workflow_trigger(request: Request) -> JSONResponse:
+        """The Node-RED/Activepieces action hop, authenticated by its own token.
+
+        The path is fixed by the brief and deliberately outside
+        ``/api/v1/plugins/``: a flow node holds ``X-PPX-Workflow-Token``, never the
+        operator's admin token, so the plugin-prefix middleware must not see this
+        request. When the plugin is switched off the gate answers exactly as it
+        would for a mounted route (404), and a caller cannot tell the switch from
+        a deployment that removed the feature.
+        """
+        mounted = gw.plugins.get("workflow_webhook")
+        if mounted is None or not mounted.available or mounted.deps is None:
+            decision = gw.gate.status("workflow_webhook")
+            if decision.usable:
+                # Enabled but the module did not build its router: a deployment
+                # fault, not a missing feature, and 503 is retryable.
+                return JSONResponse(
+                    {"ok": False, "plugin": "workflow_webhook", "reason": "plugin_unavailable",
+                     "detail": "the workflow module is enabled but was not mounted"},
+                    status_code=503,
+                )
+            return JSONResponse(decision.as_body(), status_code=decision.http_status)
+        return await mounted.module.handle_trigger(mounted.deps, request)
 
     @app.get("/", include_in_schema=False)
     async def console() -> Any:
@@ -4027,15 +4068,18 @@ def create_app(config: Optional[Config] = None, *, gateway: Optional[Gateway] = 
 # ─────────────────────────────────────────────────────────────────────────────
 
 #: The only routes that answer without `X-Admin-Token`, and why each is allowed to:
-#: `/healthz` carries no data, `/` is the static console shell, and the other two
-#: authenticate the caller with the per-follower H5 HMAC instead of with an operator
-#: secret. Anything added here is a decision to publish, so it is written out.
+#: `/healthz` carries no data, `/` is the static console shell, `/h5` and
+#: `/api/v1/verifyH5Auth` authenticate the caller with the per-follower H5 HMAC,
+#: and `/api/v1/workflows/trigger` authenticates with a scoped workflow token that
+#: an operator mints and can revoke. Anything added here is a decision to publish,
+#: so it is written out.
 PUBLIC_ROUTE_KEYS = frozenset(
     {
         ("GET", "/healthz"),
         ("GET", "/"),
         ("GET", "/h5/{article_id}"),
         ("POST", "/api/v1/verifyH5Auth"),
+        ("POST", "/api/v1/workflows/trigger"),
     }
 )
 
@@ -4453,7 +4497,7 @@ def oracle_agreement_checks(
 def _declared_router_prefix(tree: ast.AST, module: Any, spec: Any) -> Optional[str]:
     """Resolve the `prefix=` of the `APIRouter(...)` inside one `create_router`.
 
-    Three spellings exist across the five plugins and all three mean the mount table's
+    Three spellings exist across the eight plugins and all three mean the mount table's
     value: a literal (`ai_agent_plugin.py:URL_PREFIX`), `deps.spec.url_prefix`, and
     `_router_prefix(deps)`, which returns `spec.url_prefix` for its own plugin id. A
     prefix this function cannot evaluate returns `None`, because guessing here would
@@ -4682,7 +4726,7 @@ def self_test() -> List[str]:
     check("no_verb_and_path_is_registered_twice", len(keys) == len(set(keys)))
     check("every_api_path_is_under_api_v1",
           all(key.split(" ", 1)[1].startswith("/api/v1/") for key in keys if " /api/" in key))
-    check("the_public_routes_are_exactly_the_documented_four",
+    check("the_public_routes_are_exactly_the_documented_five",
           sorted(("%s %s" % (str(row["verb"]).upper(), row["path"]))
                  for row in routes if not row["admin"])
           == sorted("%s %s" % (verb, path) for verb, path in PUBLIC_ROUTE_KEYS))
@@ -4813,7 +4857,7 @@ def self_test() -> List[str]:
           and mount_prefix("/api/v1/plugins/alerts/", "/api/v1/plugins/alerts") == "")
     # The other half of the same rule, and the control that keeps the check above
     # from passing because it matches everything: a router that carries nothing is
-    # still put under the mount table's prefix, or two of the five plugins would be
+    # still put under the mount table's prefix, or two of the eight plugins would be
     # served at bare `/status` and `/sessions`.
     check("mount_prefix_still_prefixes_a_bare_router",
           mount_prefix("", "/api/v1/plugins/ai") == "/api/v1/plugins/ai"
@@ -4873,7 +4917,7 @@ def self_test() -> List[str]:
         check("plugin_%s_answers_status_at_its_own_prefix" % spec.plugin_id,
               own_status in set(mounted_routes.get(spec.plugin_id) or []))
     # Control: the census has to *see* the row it asserts on. Deleting it from a copy
-    # changes the answer, which is what makes the five checks above non-vacuous.
+    # changes the answer, which is what makes the per-plugin checks above non-vacuous.
     _polls_rows = set(mounted_routes.get("polls") or [])
     _polls_without_status = {row for row in _polls_rows if not row.endswith("/status")}
     check("the_status_census_can_miss_a_status_route",
@@ -5622,10 +5666,14 @@ def http_self_test() -> List[str]:
                 ("POPOPX_NODE_WS_URL", "ws://127.0.0.1:1"),
                 ("POPOPX_OFFICIAL_ED25519_PUBLIC_KEY", issuer_pub),
                 ("POPOPX_BILLING_REQUIRE_VOUCHER", "1"),
-                # All five, so the sweep below cannot pass by quietly covering fewer
-                # routes than the suite declares: `web3_bridge` is off by default
-                # (config.py:445) and its four GETs vanish from the app without a word.
+                # All eight, so the sweep below cannot pass by quietly covering fewer
+                # routes than the suite declares: `web3_bridge` and the three connectors
+                # are off by default (config.py) and their GETs vanish from the app
+                # without a word.
                 ("POPOPX_PLUGIN_WEB3_BRIDGE", "1"),
+                ("POPOPX_PLUGIN_WORKFLOW_WEBHOOK", "1"),
+                ("POPOPX_PLUGIN_CARDDAV_CONNECTOR", "1"),
+                ("POPOPX_PLUGIN_CALDAV_CONNECTOR", "1"),
             ]
         ),
         encoding="utf-8",
@@ -5826,7 +5874,7 @@ def http_self_test() -> List[str]:
               client.post("/api/v1/verifyH5Auth", json={"popopx_uid": "u_x", "ts": "1", "sig": "y"}).status_code
               in (200, 400, 401))
 
-        # The five consoles. Each panel fetches `<url_prefix>/status`, and a plugin
+        # The eight consoles. Each panel fetches `<url_prefix>/status`, and a plugin
         # router mounted first means its own wildcard (`/{alert_id}`, `/{poll_id}`)
         # answers that path first too — so this is the check that a panel is reachable,
         # not merely that a status route exists somewhere on the gateway. The header is
@@ -5848,7 +5896,7 @@ def http_self_test() -> List[str]:
             if response.status_code not in (200, 503) or named != spec.plugin_id:
                 shadowed.append("%s -> %d %s" % (spec.url_prefix + probe, response.status_code, named))
         detail("every_plugin_console_answers_its_status_at_its_own_prefix", shadowed)
-        # Control: the wildcards are still live, so the five 200s above came from a
+        # Control: the wildcards are still live, so the status answers above came from a
         # literal route winning the ordering, not from a matcher that accepts anything.
         wildcard = client.get("/api/v1/plugins/polls/definitely-not-an-id", headers=headers)
         check("the_plugin_wildcard_route_still_answers",
@@ -5939,7 +5987,7 @@ def http_self_test() -> List[str]:
 #: Every module that owns a suite of its own. ``--self-test`` runs this list and
 #: prints one line per module, because the protocol suite in ``self_test()`` above
 #: proves the wire formats and nothing else: the billing state machine, the
-#: channel-key crypto and the five paid plugins all live in other files, and a
+#: channel-key crypto and the paid plugins all live in other files, and a
 #: launcher that reported "220 checks passed" while leaving them out would be
 #: advertising coverage it did not have. A module missing from a *file* that does
 #: not exist is a build error; a module whose file exists but has no suite is only
@@ -5951,12 +5999,16 @@ SELF_TEST_MODULES: Tuple[str, ...] = (
     "app.crypto_service",
     "app.billing_service",
     "app.agent_bridge",
+    "app.connectors",
     "app.plugins",
     "app.plugins.ai_agent_plugin",
     "app.plugins.alert_ops_plugin",
     "app.plugins.polls_plugin",
     "app.plugins.privacy_sso_plugin",
     "app.plugins.web3_bridge_plugin",
+    "app.plugins.workflow_webhook_plugin",
+    "app.plugins.carddav_connector",
+    "app.plugins.caldav_connector",
 )
 
 
