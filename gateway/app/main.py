@@ -161,6 +161,14 @@ from app.crypto_service import (
     epoch_secret_plaintext,
 )
 from app.database import Database
+from app.opaque_invite_codec import (
+    LINK_PREFIX,
+    InviteCodecError,
+    decode_invite,
+    encode_invite,
+    invite_code_prefix,
+    mask_invite_link,
+)
 from app.plugins import (
     PLUGIN_SPEC,
     CardDelivery,
@@ -236,6 +244,11 @@ MENU_KEYWORD_PREFIX = "kw:"
 SETTING_AUTO_ACCEPT = "gateway.auto_accept"
 SETTING_WELCOME_TEXT = "gateway.welcome_text"
 SETTING_ARTICLE_PREFIX = "article:"
+SETTING_INVITE_LINK_PREFIX = "invite_link:"
+
+#: Kinds the invite-link audit table accepts. The CHECK in `database.py` is the
+#: enforcement; this tuple is what keeps the API and the DDL from drifting.
+INVITE_KINDS: Tuple[str, ...] = ("service_account", "channel")
 
 H5_PATH_VERIFY = "/api/v1/verifyH5Auth"
 
@@ -1828,6 +1841,133 @@ class EcoService:
         except EcoError:
             return None
 
+    # ── opaque invite links (privacy format, not protocol) ──────────────────
+
+    def invite_link(self, kind: str, subject_id: str, raw_uri: Optional[str]) -> Dict[str, Any]:
+        """Return the stable opaque link for one subject, minting it once.
+
+        The cache key is the subject, and the cached entry is only reused when
+        it still decodes to the *current* raw URI: rotating a contact address or
+        changing a channel relay therefore invalidates it without a separate
+        version column. A mint writes exactly one audit row with the masked
+        prefix and the generation time — never the link, the code or the relay.
+
+        This method never raises. A missing wheel, a missing relay or an
+        invalid settings row all come back as `error`, because it sits on the
+        `/status` path and a status endpoint that 500s is worse than one that
+        says the invite link is unavailable.
+        """
+        kind = str(kind or "")
+        subject = str(subject_id or "")
+        text = str(raw_uri or "")
+        blank: Dict[str, Any] = {
+            "link": None,
+            "masked": None,
+            "created_at_ms": None,
+            "cached": False,
+        }
+        if kind not in INVITE_KINDS or not subject:
+            return dict(blank, error="invite_kind_invalid")
+        if not text:
+            return dict(blank, error="invite_source_unavailable")
+
+        key = SETTING_INVITE_LINK_PREFIX + kind + ":" + subject
+
+        def cached_entry(value: Any) -> Optional[Dict[str, Any]]:
+            if not isinstance(value, Mapping):
+                return None
+            link = str(value.get("link") or "")
+            created = value.get("created_at_ms")
+            if not link or not isinstance(created, (int, float)):
+                return None
+            try:
+                if decode_invite(link) != text:
+                    return None
+            except InviteCodecError:
+                return None
+            return {
+                "link": link,
+                "masked": mask_invite_link(link),
+                "created_at_ms": int(created),
+                "cached": True,
+            }
+
+        hit = cached_entry(self.db.get_setting(key))
+        if hit is not None:
+            return hit
+
+        try:
+            link = encode_invite(text)
+        except InviteCodecError as exc:
+            return dict(blank, error=exc.code)
+        created = now_ms()
+        entry = {
+            "link": link,
+            "created_at_ms": created,
+            "kind": kind,
+            "subject_id": subject,
+        }
+        with self.db.transaction() as conn:
+            row = conn.execute("SELECT value_json FROM settings WHERE key = ?", (key,)).fetchone()
+            if row is not None:
+                try:
+                    winner = json.loads(row["value_json"])
+                except (TypeError, ValueError):
+                    winner = None
+                hit = cached_entry(winner)
+                if hit is not None:
+                    return hit
+            conn.execute(
+                "INSERT INTO settings (key, value_json, updated_at_ms) VALUES (?, ?, ?)"
+                " ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at_ms = excluded.updated_at_ms",
+                (key, json.dumps(entry, ensure_ascii=False, separators=(",", ":")), created),
+            )
+            conn.execute(
+                "INSERT INTO invite_link_audit (created_at_ms, kind, subject_id, code_prefix) VALUES (?, ?, ?, ?)",
+                (created, kind, subject, invite_code_prefix(link)),
+            )
+        return {
+            "link": link,
+            "masked": mask_invite_link(link),
+            "created_at_ms": created,
+            "cached": False,
+        }
+
+    def decorate_invite(
+        self,
+        payload: Dict[str, Any],
+        *,
+        kind: str,
+        subject_id: str,
+        raw_uri: Optional[str],
+        field: str = "invite_link",
+    ) -> Dict[str, Any]:
+        """Attach the opaque link fields to an API payload without hiding the raw one.
+
+        The raw URI stays in its existing field for the protocol and for the
+        console's 高级诊断 fold. What changes is which field a caller reaches
+        for by default: `*_link` is always the opaque link, and it is `None`
+        (with `*_link_error`) rather than a raw fallback when it cannot be
+        minted.
+        """
+        info = self.invite_link(kind, subject_id, raw_uri)
+        payload[field] = info.get("link")
+        payload[field + "_masked"] = info.get("masked")
+        payload[field + "_created_at_ms"] = info.get("created_at_ms")
+        if info.get("error"):
+            payload[field + "_error"] = info["error"]
+        return payload
+
+    def invite_link_audit(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Recent generations, masked. There is no column that could leak a code."""
+        count = max(1, min(int(limit or 50), 200))
+        rows = self.db.query(
+            "SELECT id, created_at_ms, kind, subject_id, code_prefix"
+            "  FROM invite_link_audit ORDER BY id DESC LIMIT ?",
+            (count,),
+        )
+        return [row_dict(row) for row in rows]
+
     def _channel_secret(self, channel_id: str) -> bytes:
         row = self.db.query_one(
             "SELECT identity_sec_b64url FROM channels WHERE channel_id = ?", (str(channel_id),)
@@ -1899,36 +2039,51 @@ class EcoService:
         if sealed_under == epoch and epoch == 1 and existing is None:
             # Nothing to send: the URI *is* the key handover, and `ku` cannot carry
             # a first epoch (`isSane` refuses se == envelope.epoch).
-            return {
-                "ok": bool(public_uri),
-                "channel_id": channel_id,
-                "contact_id": contact_id,
-                "epoch": epoch,
-                "renewed": False,
-                "expires_at_ms": expires,
-                "delivered": False,
-                "credits_charged": 0,
-                "public_uri": public_uri,
-                "error": None if public_uri else "no_relay",
-            }
+            return self.decorate_invite(
+                {
+                    "ok": bool(public_uri),
+                    "channel_id": channel_id,
+                    "contact_id": contact_id,
+                    "epoch": epoch,
+                    "renewed": False,
+                    "expires_at_ms": expires,
+                    "delivered": False,
+                    "credits_charged": 0,
+                    "public_uri": public_uri,
+                    "error": None if public_uri else "no_relay",
+                },
+                kind="channel",
+                subject_id=channel_id,
+                raw_uri=public_uri,
+            )
         grant = await self.deliver_channel_key(
             channel_id, contact_id, sealed_under=sealed_under, issued_epoch=issued_epoch
         )
         # "This device already holds the current epoch" is a successful renewal with
         # nothing left to send, not a failure; the console must not show it as one.
         already = grant.error == "already_issued"
-        return {
-            "ok": bool(grant.delivered) or already,
-            "channel_id": channel_id,
-            "contact_id": contact_id,
-            "epoch": epoch,
-            "renewed": existing is not None,
-            "expires_at_ms": expires,
-            "delivered": bool(grant.delivered),
-            "public_uri": grant.public_uri,
-            "credits_charged": int(grant.charged or 0),
-            "error": None if already else grant.error,
-        }
+        # `deliver_channel_key` answers `already_issued` from an early return that
+        # carries no `public_uri` (there was nothing to deliver), so the channel
+        # URI resolved above is the one to report and to decorate with. Using the
+        # grant's copy here would turn a successful renewal into a link-less
+        # response that claims the source is unavailable.
+        return self.decorate_invite(
+            {
+                "ok": bool(grant.delivered) or already,
+                "channel_id": channel_id,
+                "contact_id": contact_id,
+                "epoch": epoch,
+                "renewed": existing is not None,
+                "expires_at_ms": expires,
+                "delivered": bool(grant.delivered),
+                "public_uri": grant.public_uri or public_uri,
+                "credits_charged": int(grant.charged or 0),
+                "error": None if already else grant.error,
+            },
+            kind="channel",
+            subject_id=channel_id,
+            raw_uri=grant.public_uri or public_uri,
+        )
 
     def revoke_membership(self, channel_id: str, contact_id: int) -> Dict[str, Any]:
         if self.channel_state(channel_id) is None:
@@ -2901,15 +3056,26 @@ class Gateway:
     def status(self) -> Dict[str, Any]:
         from app import __version__
 
+        contact_address = str(getattr(self.bridge, "contact_address", "") or "")
+        service = {
+            "service_id": self.config.service_id,
+            "display_name": self.config.service_name,
+            "public_base_url": self.eco.public_base,
+            # Raw protocol URI: kept for the diagnostic fold and for anything
+            # that imports it; `contact_link` is the field to share.
+            "contact_address": contact_address,
+        }
+        self.eco.decorate_invite(
+            service,
+            kind="service_account",
+            subject_id=self.eco.service_id,
+            raw_uri=contact_address,
+            field="contact_link",
+        )
         return {
             "ok": True,
             "version": __version__,
-            "service": {
-                "service_id": self.config.service_id,
-                "display_name": self.config.service_name,
-                "public_base_url": self.eco.public_base,
-                "contact_address": str(getattr(self.bridge, "contact_address", "") or ""),
-            },
+            "service": service,
             "node": self.bridge.state(),
             "billing": self.billing.account().to_dict(),
             "outbox": self.eco.outbox_stats(),
@@ -3108,6 +3274,31 @@ def _h5_shell(article_id: str, body: str, title: str, *, error: str = "") -> str
         "<footer>内容由 POPOPX 服务号签发，链接含一次性身份参数，请勿转发。</footer>"
         "</body></html>"
     ) % (html_escape(title), html_escape(title), html_escape(article_id), notice, paragraphs)
+
+
+def qr_svg_for_link(link: str) -> str:
+    """Render one opaque invite link as an SVG QR code.
+
+    The QR carries the same text the console copies — the opaque link, never
+    the raw URI — so a screenshot of the code cannot reveal a relay either.
+    `qrcode` is imported lazily because the SVG surface is optional: a
+    deployment without the wheel still serves every other route, and the
+    caller turns the ImportError into a named `qr_unavailable` field rather
+    than a 500.
+    """
+    import qrcode
+    import qrcode.image.svg
+
+    qr = qrcode.QRCode(
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=10,
+        border=2,
+        image_factory=qrcode.image.svg.SvgPathImage,
+    )
+    qr.add_data(link)
+    qr.make(fit=True)
+    rendered = qr.make_image().to_string()
+    return rendered.decode("utf-8") if isinstance(rendered, (bytes, bytearray)) else str(rendered)
 
 
 def create_app(config: Optional[Config] = None, *, gateway: Optional[Gateway] = None) -> Any:
@@ -3425,7 +3616,14 @@ def create_app(config: Optional[Config] = None, *, gateway: Optional[Gateway] = 
         if not address or body.get("rotate"):
             address = await gw.bridge.create_contact_address(pq_ratchet=bool(body.get("pq_ratchet", True)))
         gw.db.execute("UPDATE service_identity SET address = ?, updated_at_ms = ? WHERE id = 1", (address, now_ms()))
-        return {"ok": True, "contact_address": address}
+        payload = {"ok": True, "contact_address": address}
+        return gw.eco.decorate_invite(
+            payload,
+            kind="service_account",
+            subject_id=gw.eco.service_id,
+            raw_uri=address,
+            field="contact_link",
+        )
 
     @app.post("/api/v1/node/accept")
     async def node_accept(request: Request) -> Dict[str, Any]:
@@ -3717,7 +3915,16 @@ def create_app(config: Optional[Config] = None, *, gateway: Optional[Gateway] = 
     @app.get("/api/v1/channels")
     async def channels_get(request: Request) -> Dict[str, Any]:
         admin_required(request)
-        return {"ok": True, "channels": gw.eco.channels()}
+        rows = gw.eco.channels()
+        for row in rows:
+            channel_id = str(row.get("channel_id") or "")
+            gw.eco.decorate_invite(
+                row,
+                kind="channel",
+                subject_id=channel_id,
+                raw_uri=gw.eco.channel_public_uri(channel_id),
+            )
+        return {"ok": True, "channels": rows}
 
     @app.post("/api/v1/channels")
     async def channels_post(request: Request) -> Dict[str, Any]:
@@ -3730,8 +3937,12 @@ def create_app(config: Optional[Config] = None, *, gateway: Optional[Gateway] = 
             relay=str(body.get("relay") or ""),
             node_group_id=int_or_none(body.get("node_group_id")),
         )
-        return {"ok": True, "channel": state, "public_uri": gw.eco.channel_public_uri(channel_id),
-                "epochs": gw.eco.epoch_history(channel_id)}
+        raw_uri = gw.eco.channel_public_uri(channel_id)
+        invite = {"kind": "channel", "subject_id": channel_id, "raw_uri": raw_uri}
+        gw.eco.decorate_invite(state, **invite)
+        payload = {"ok": True, "channel": state, "public_uri": raw_uri,
+                   "epochs": gw.eco.epoch_history(channel_id)}
+        return gw.eco.decorate_invite(payload, **invite)
 
     @app.get("/api/v1/channels/{channel_id}")
     async def channel_get(channel_id: str, request: Request) -> Dict[str, Any]:
@@ -3739,13 +3950,17 @@ def create_app(config: Optional[Config] = None, *, gateway: Optional[Gateway] = 
         state = gw.eco.channel_state(channel_id)
         if state is None:
             raise not_found("channel_not_found", channel_id)
-        return {
+        raw_uri = gw.eco.channel_public_uri(channel_id)
+        invite = {"kind": "channel", "subject_id": channel_id, "raw_uri": raw_uri}
+        gw.eco.decorate_invite(state, **invite)
+        payload = {
             "ok": True,
             "channel": state,
             "epochs": gw.eco.epoch_history(channel_id),
             "members": gw.eco.members(channel_id),
-            "public_uri": gw.eco.channel_public_uri(channel_id),
+            "public_uri": raw_uri,
         }
+        return gw.eco.decorate_invite(payload, **invite)
 
     @app.put("/api/v1/channels/{channel_id}/uri")
     async def channel_uri(channel_id: str, request: Request) -> Dict[str, Any]:
@@ -3764,10 +3979,16 @@ def create_app(config: Optional[Config] = None, *, gateway: Optional[Gateway] = 
         uri = str(body.get("uri") or "")
         relay = str(body.get("relay") or "")
         if uri:
-            return {"ok": True, "channel": gw.eco.set_channel_uri(channel_id, uri)}
-        if not relay:
+            state = gw.eco.set_channel_uri(channel_id, uri)
+        elif not relay:
             raise bad_request("relay_or_uri_required", "send {relay} or {uri}")
-        return {"ok": True, "channel": gw.eco.set_channel_relay(channel_id, relay)}
+        else:
+            state = gw.eco.set_channel_relay(channel_id, relay)
+        raw_uri = gw.eco.channel_public_uri(channel_id)
+        invite = {"kind": "channel", "subject_id": channel_id, "raw_uri": raw_uri}
+        gw.eco.decorate_invite(state, **invite)
+        payload = {"ok": True, "channel": state, "public_uri": raw_uri}
+        return gw.eco.decorate_invite(payload, **invite)
 
     @app.post("/api/v1/channels/{channel_id}/rotate")
     async def channel_rotate(channel_id: str, request: Request) -> Dict[str, Any]:
@@ -3825,6 +4046,78 @@ def create_app(config: Optional[Config] = None, *, gateway: Optional[Gateway] = 
         """
         admin_required(request)
         return gw.eco.revoke_membership(channel_id, int(contact_id))
+
+    # ── opaque invite links ─────────────────────────────────────────────────
+
+    @app.post("/api/v1/invite-links")
+    async def invite_link_post(request: Request) -> Dict[str, Any]:
+        """Mint (or fetch) the opaque share link and its QR for one subject.
+
+        `uri` is deliberately not accepted from the body. The gateway seals
+        only URIs it owns — the contact address the node returned, or a
+        channel's own public URI — because a route that seals a caller-supplied
+        string under the associated domain `popopx.chat` is a phishing oracle
+        with a trusted URL.
+        """
+        admin_required(request)
+        body = await json_body(request)
+        kind = str(body.get("kind") or "service_account")
+        if kind not in INVITE_KINDS:
+            raise bad_request("invite_kind_invalid", "expected one of %s" % (", ".join(INVITE_KINDS),))
+        if kind == "channel":
+            subject_id = str(body.get("channel_id") or "").strip()
+            if not subject_id:
+                raise bad_request("channel_id_required")
+            if gw.eco.channel_state(subject_id) is None:
+                raise not_found("channel_not_found", subject_id)
+            raw_uri = gw.eco.channel_public_uri(subject_id)
+            if not raw_uri:
+                raise conflict(
+                    "invite_source_unavailable",
+                    "this channel has no relay yet; set one with PUT /api/v1/channels/{id}/uri",
+                )
+        else:
+            subject_id = gw.eco.service_id
+            raw_uri = str(getattr(gw.bridge, "contact_address", "") or "")
+            if not raw_uri:
+                raise conflict(
+                    "invite_source_unavailable",
+                    "no contact address yet; POST /api/v1/node/address first",
+                )
+        info = gw.eco.invite_link(kind, subject_id, raw_uri)
+        if not info.get("link"):
+            code = str(info.get("error") or "invite_source_unavailable")
+            if code == "invite_crypto_unavailable":
+                raise unavailable(code, "the opaque invite codec needs the cryptography wheel")
+            raise conflict(code, "the opaque invite link could not be minted")
+        qr_svg = None
+        qr_error = None
+        if bool(body.get("qr", True)):
+            try:
+                qr_svg = qr_svg_for_link(info["link"])
+            except ImportError:
+                qr_error = "qr_unavailable"
+            except Exception:  # noqa: BLE001 — a broken QR must not cost the link
+                LOG.exception("QR generation failed for %s invite %s", kind, subject_id)
+                qr_error = "qr_failed"
+        return {
+            "ok": True,
+            "kind": kind,
+            "subject_id": subject_id,
+            "link": info["link"],
+            "masked": info["masked"],
+            "created_at_ms": info["created_at_ms"],
+            "cached": bool(info.get("cached")),
+            "qr_svg": qr_svg,
+            "qr_error": qr_error,
+        }
+
+    @app.get("/api/v1/invite-links/audit")
+    async def invite_link_audit_get(request: Request) -> Dict[str, Any]:
+        """Generation history: masked prefixes and times, never a code or URI."""
+        admin_required(request)
+        limit = int_or_none(dict(request.query_params).get("limit")) or 50
+        return {"ok": True, "entries": gw.eco.invite_link_audit(limit)}
 
     # ── articles ────────────────────────────────────────────────────────────
 
@@ -4570,7 +4863,7 @@ class FakeBridge:
         self.connected = True
         self.fail: Optional[BaseException] = None
         self.user_id = 7
-        self.contact_address = "service@popopx.local"
+        self.contact_address = "https://smp1.popopx.test/a#service-account"
         self.accepted: List[int] = []
 
     async def send_text(self, contact_id: int, text: str, **_kwargs: Any) -> Dict[str, Any]:
@@ -4594,7 +4887,7 @@ class FakeBridge:
         return self.contact_address
 
     async def create_contact_address(self, **_kwargs: Any) -> str:
-        self.contact_address = "rotated@popopx.local"
+        self.contact_address = "https://smp1.popopx.test/a#rotated"
         return self.contact_address
 
     async def set_profile(self, display_name: str, full_name: str = "", **_kwargs: str) -> Dict[str, Any]:
@@ -4687,7 +4980,17 @@ _fake_seal.calls = []  # type: ignore[attr-defined]
 
 def self_test() -> List[str]:
     """Returns the list of passed check names; raises `AssertionError` on the first failure."""
+    import importlib.util
     import tempfile
+
+    # Opaque invite links are the one protocol surface that cannot be faked here:
+    # `invite_link` seals with the real ChaCha20-Poly1305. On an interpreter
+    # without the wheel the contract is that it names the missing dependency
+    # (`invite_crypto_unavailable`) instead of inventing a link, so the checks
+    # below assert that degraded answer rather than skipping the semantics. The
+    # codec and HTTP groups, which prove the bytes end to end, are gated on the
+    # same wheel and say so on their own SKIPPED line.
+    crypto_ready = importlib.util.find_spec("cryptography") is not None
 
     checks: List[str] = []
 
@@ -4705,6 +5008,22 @@ def self_test() -> List[str]:
         except Exception as exc:  # noqa: BLE001
             raise AssertionError("%s raised %s (%s), expected %s" % (name, type(exc).__name__, exc, error)) from exc
         raise AssertionError("%s did not raise %s" % (name, error))
+
+    def invite_degraded(payload: Dict[str, Any], field: str = "invite_link") -> bool:
+        """The only legal answer without the wheel: no link, and the reason named."""
+        return (
+            not crypto_ready
+            and payload.get(field) is None
+            and payload.get(field + "_error") == "invite_crypto_unavailable"
+        )
+
+    def invite_info_degraded(info: Dict[str, Any]) -> bool:
+        """The same contract for :meth:`EcoService.invite_link`'s own result shape."""
+        return (
+            not crypto_ready
+            and info.get("link") is None
+            and info.get("error") == "invite_crypto_unavailable"
+        )
 
     # ── 1. pure helpers ─────────────────────────────────────────────────────
 
@@ -5401,6 +5720,40 @@ def self_test() -> List[str]:
         check("the_member_starts_at_the_uri_epoch", int(eco.members("green")[0]["epoch"]) == 1)
         check("sessions_for_channel_only_returns_members",
               [s.contact_id for s in eco.sessions_for_channel("green")] == [42])
+        granted_link = str(granted.get("invite_link") or "")
+        check("a_bootstrap_grant_publishes_the_invite_link_or_names_the_missing_wheel",
+              (granted_link.startswith(LINK_PREFIX) and granted.get("invite_link_error") is None)
+              if crypto_ready else invite_degraded(granted))
+        check("the_grant_invite_link_binds_the_public_uri_when_present",
+              decode_invite(granted_link) == uri if crypto_ready else invite_degraded(granted))
+        check("the_grant_invite_link_hides_the_relay_when_present",
+              "example.test" not in granted_link.lower()
+              if crypto_ready else invite_degraded(granted))
+        check("the_grant_invite_link_is_stable_across_reads",
+              eco.invite_link("channel", "green", uri)["link"] == (granted_link if crypto_ready else None))
+        check("the_grant_invite_link_reports_whether_it_came_from_the_cache",
+              eco.invite_link("channel", "green", uri)["cached"] is True
+              if crypto_ready else invite_info_degraded(eco.invite_link("channel", "green", uri)))
+        audit_rows = eco.invite_link_audit(10)
+        check("the_audit_counts_link_generations_not_reads",
+              len(audit_rows) == (1 if crypto_ready else 0)
+              and (not crypto_ready or (audit_rows[0]["kind"] == "channel"
+                                        and audit_rows[0]["subject_id"] == "green")))
+        check("the_audit_never_keeps_a_full_code_or_uri",
+              (not crypto_ready or audit_rows[0]["code_prefix"] == invite_code_prefix(granted_link))
+              and (not crypto_ready or granted_link[len(LINK_PREFIX):] not in json.dumps(audit_rows))
+              and str(uri) not in json.dumps(audit_rows))
+        cached_setting = db.get_setting(SETTING_INVITE_LINK_PREFIX + "channel:green")
+        check("the_link_cache_never_stores_the_raw_uri",
+              (cached_setting is None if not crypto_ready
+               else isinstance(cached_setting, dict) and "link" in cached_setting)
+              and "smp8" not in json.dumps(cached_setting).lower())
+        missing_link = eco.invite_link("channel", "green", "")
+        check("a_missing_source_is_named_not_faked",
+              missing_link["link"] is None and missing_link["error"] == "invite_source_unavailable")
+        bad_kind = eco.invite_link("unknown", "green", uri)
+        check("an_unknown_invite_kind_is_refused",
+              bad_kind["link"] is None and bad_kind["error"] == "invite_kind_invalid")
 
         epoch_one_key = b64_decode_lenient(str(row_dict(
             db.query_one("SELECT key_b64url FROM channel_epochs WHERE channel_id='green' AND epoch=1")
@@ -5442,6 +5795,9 @@ def self_test() -> List[str]:
         check("renewing_at_the_current_epoch_is_ok_without_a_frame",
               renewed["ok"] and renewed["renewed"] and not renewed["delivered"]
               and renewed["error"] is None and renewed["credits_charged"] == 0)
+        check("a_renewal_does_not_mint_another_link",
+              renewed.get("invite_link") == (granted_link if crypto_ready else None)
+              and len(eco.invite_link_audit(10)) == (1 if crypto_ready else 0))
         check("a_second_rotation_seals_under_the_delivered_epoch",
               int(run(eco.rotate_channel_key("green"))["sealed_under_epoch"]) == 2
               and _fake_seal.calls[-1]["sealing_key"] == epoch_two_key)
@@ -5496,6 +5852,29 @@ def self_test() -> List[str]:
               int(db.scalar("SELECT COUNT(*) FROM service_identity") or 0) == 1
               and identity.get("service_id") == config.service_id)
         check("async_boot_keeps_the_address_the_node_named", identity.get("address") == bridge.contact_address)
+        status = gw.status()
+        service = status["service"]
+        contact_link = str(service.get("contact_link") or "")
+        check("status_keeps_the_raw_contact_address_for_diagnostics",
+              service.get("contact_address") == bridge.contact_address)
+        check("status_publishes_the_contact_link_or_names_the_missing_wheel",
+              contact_link.startswith(LINK_PREFIX) if crypto_ready else invite_degraded(service, "contact_link"))
+        check("the_contact_link_binds_the_node_address_when_present",
+              decode_invite(contact_link) == bridge.contact_address if crypto_ready
+              else invite_degraded(service, "contact_link"))
+        check("the_contact_link_hides_the_relay_when_present",
+              "popopx.test" not in contact_link.lower()
+              if crypto_ready else invite_degraded(service, "contact_link"))
+        check("the_contact_link_reports_whether_it_came_from_the_cache",
+              eco.invite_link("service_account", config.service_id, bridge.contact_address)["cached"] is True
+              if crypto_ready
+              else invite_info_degraded(
+                  eco.invite_link("service_account", config.service_id, bridge.contact_address)))
+        service_audit = eco.invite_link_audit(10)
+        check("the_service_account_generation_is_audited_under_its_own_kind",
+              len(service_audit) == (2 if crypto_ready else 0)
+              and (not crypto_ready or (service_audit[0]["kind"] == "service_account"
+                                        and service_audit[0]["subject_id"] == config.service_id)))
 
         eco.store_menu([
             {"title": "订单", "kind": "click", "action": {"action": "callback", "payload": "kw:order"}},
@@ -5914,6 +6293,121 @@ def http_self_test() -> List[str]:
               wildcard.status_code == 400 and "poll_id_invalid" in str(wildcard.json()),
               )
 
+        # The opaque invite format is what the console actually hands to a follower,
+        # so it is asserted as served: the field names, the decoding, and — the point
+        # of the format — that neither the default link nor its QR names the relay.
+        raw_contact = "https://smp1.popopx.test/a#http-service"
+        gateway.eco.bridge.contact_address = raw_contact
+        served_status = client.get("/api/v1/status", headers=headers).json().get("service", {})
+        served_link = str(served_status.get("contact_link") or "")
+        check("status_serves_an_opaque_contact_link",
+              served_status.get("contact_address") == raw_contact
+              and served_link.startswith(LINK_PREFIX)
+              and decode_invite(served_link) == raw_contact)
+        check("the_status_contact_link_hides_the_relay",
+              "popopx.im" not in served_link.lower() and "popopx.test" not in served_link.lower())
+        check("the_status_contact_link_is_masked_for_logs",
+              str(served_status.get("contact_link_masked") or "").startswith(LINK_PREFIX)
+              and served_status.get("contact_link_masked") != served_link
+              and served_link not in str(served_status.get("contact_link_masked")))
+        check("the_status_contact_link_records_when_it_was_minted",
+              isinstance(served_status.get("contact_link_created_at_ms"), int)
+              and served_status["contact_link_created_at_ms"] > 0)
+        check("the_status_contact_link_minted_without_an_error",
+              not served_status.get("contact_link_error"))
+
+        minted = client.post("/api/v1/invite-links", json={}, headers=headers)
+        minted_body = minted.json()
+        minted_link = str(minted_body.get("link") or "")
+        minted_qr = str(minted_body.get("qr_svg") or "")
+        check("the_invite_route_mints_the_opaque_service_account_link",
+              minted.status_code == 200 and minted_body.get("kind") == "service_account"
+              and minted_body.get("subject_id") == gateway.eco.service_id
+              and minted_link == served_link and minted_body.get("cached") is True)
+        check("the_invite_route_returns_a_QR_of_the_opaque_link",
+              minted_qr.lstrip().startswith("<svg") and not minted_body.get("qr_error")
+              and "popopx.im" not in minted_qr.lower() and "popopx.test" not in minted_qr.lower())
+        check("the_invite_route_does_not_echo_the_raw_uri",
+              raw_contact not in str(minted_body) and "smp1.popopx.test" not in str(minted_body))
+        # The anti-phishing property: a caller-supplied URI is ignored, so this
+        # route cannot seal somebody else's string under the popopx.chat domain.
+        phishing = client.post(
+            "/api/v1/invite-links",
+            json={"kind": "service_account", "uri": "https://evil.example/free-money"},
+            headers=headers,
+        ).json()
+        check("the_invite_route_ignores_a_caller_supplied_uri",
+              decode_invite(str(phishing.get("link") or "")) == raw_contact
+              and "evil.example" not in str(phishing))
+
+        created = client.post(
+            "/api/v1/channels",
+            json={"channel_id": "ch-http-invite", "title": "HTTP Invite", "relay": "smp2.popopx.test"},
+            headers=headers,
+        )
+        created_body = created.json()
+        created_channel = created_body.get("channel", {})
+        channel_link = str(created_channel.get("invite_link") or "")
+        channel_uri = str(created_body.get("public_uri") or "")
+        check("a_created_channel_carries_an_opaque_invite_link",
+              created.status_code == 200 and channel_uri.startswith("popopx://channel/")
+              and channel_link.startswith(LINK_PREFIX) and decode_invite(channel_link) == channel_uri)
+        check("a_created_channel_still_exposes_the_raw_uri_for_diagnostics",
+              "smp2.popopx.test" in channel_uri)
+        check("a_created_channel_invite_link_hides_the_relay",
+              "popopx.test" not in channel_link.lower() and channel_link != channel_uri)
+
+        channel_minted = client.post(
+            "/api/v1/invite-links", json={"kind": "channel", "channel_id": "ch-http-invite"}, headers=headers
+        ).json()
+        channel_minted_link = str(channel_minted.get("link") or "")
+        check("the_invite_route_serves_a_channels_QR_without_its_relay",
+              channel_minted.get("ok") is True and channel_minted_link == channel_link
+              and str(channel_minted.get("qr_svg") or "").lstrip().startswith("<svg")
+              and "smp2.popopx.test" not in str(channel_minted))
+        channel_read = client.get("/api/v1/channels/ch-http-invite", headers=headers).json()
+        check("a_channel_read_serves_the_same_opaque_invite_link",
+              str(channel_read.get("invite_link") or "") == channel_link
+              and str(channel_read.get("public_uri") or "") == channel_uri)
+        channel_list = client.get("/api/v1/channels", headers=headers).json().get("channels", [])
+        check("the_channel_list_carries_opaque_invite_links",
+              len(channel_list) == 1 and str(channel_list[0].get("invite_link") or "") == channel_link)
+
+        no_relay = client.post(
+            "/api/v1/channels", json={"channel_id": "ch-http-no-relay", "title": "No Relay"}, headers=headers
+        ).json().get("channel", {})
+        check("a_channel_without_a_relay_reports_the_invite_error_instead_of_a_link",
+              no_relay.get("invite_link") is None
+              and no_relay.get("invite_link_error") == "invite_source_unavailable")
+        refused_invite = client.post(
+            "/api/v1/invite-links", json={"kind": "channel", "channel_id": "ch-http-no-relay"}, headers=headers
+        )
+        check("the_invite_route_conflicts_when_the_channel_has_no_relay",
+              refused_invite.status_code == 409
+              and refused_invite.json().get("error") == "invite_source_unavailable")
+
+        audit = client.get("/api/v1/invite-links/audit", headers=headers).json().get("entries", [])
+        audit_columns = {"id", "created_at_ms", "kind", "subject_id", "code_prefix"}
+        check("the_invite_audit_lists_one_masked_row_per_generation",
+              audit and all(set(entry) == audit_columns for entry in audit)
+              and {entry["kind"] for entry in audit} == {"service_account", "channel"}
+              and all(len(str(entry.get("code_prefix") or "")) == 10 for entry in audit))
+        check("the_invite_audit_never_stores_the_link_code_or_raw_uri",
+              LINK_PREFIX not in str(audit)
+              and minted_link[len(LINK_PREFIX):] not in str(audit)
+              and channel_link[len(LINK_PREFIX):] not in str(audit)
+              and raw_contact not in str(audit)
+              and "popopx.test" not in str(audit).lower()
+              and "popopx.im" not in str(audit).lower())
+        bad_kind = client.post("/api/v1/invite-links", json={"kind": "contact"}, headers=headers)
+        check("the_invite_route_refuses_an_unknown_kind",
+              bad_kind.status_code == 400 and bad_kind.json().get("error") == "invite_kind_invalid")
+        missing_channel = client.post(
+            "/api/v1/invite-links", json={"kind": "channel", "channel_id": "ch-nobody"}, headers=headers
+        )
+        check("the_invite_route_refuses_an_unknown_channel",
+              missing_channel.status_code == 404 and missing_channel.json().get("error") == "channel_not_found")
+
         # The other failure an operator meets is the polite one: the socket is up and
         # the node refuses. These two frames are what a real `popopx-chat` answered
         # on 2026-11-21 (`userExists` to `/_profile`, `contactNotFound` to `/_send`),
@@ -6098,6 +6592,34 @@ def _self_test_extra(protocol_checks: List[str]) -> int:
         total += len(names)
         write("  ok       %-36s %d checks\n" % ("app.crypto_service.crypto_self_test", len(names)))
 
+    # The opaque invite format rides on the same wheel as the crypto group but is
+    # gated separately: its vectors are the cross-language contract with the iOS
+    # client, and a suite that quietly ran against the stub would print the same
+    # "ok" line as one that proved the published bytes.
+    codec_gated = "app.opaque_invite_codec.opaque_invite_self_test"
+    try:
+        codec = importlib.import_module("app.opaque_invite_codec")
+        if importlib.util.find_spec("cryptography") is None:
+            raise ImportError("the 'cryptography' distribution is not installed")
+    except Exception as exc:  # noqa: BLE001
+        skipped.append("%s (%s)" % (codec_gated, exc))
+        write(
+            "  SKIPPED  %-36s cross-language invite vectors NOT verified: %s\n"
+            % (codec_gated, exc)
+        )
+        write(
+            "           run it with the wheel, and against official_tools/swift_opaque_invite_oracle.swift,\n"
+            "           before trusting a console that hands these links to followers\n"
+        )
+    else:
+        try:
+            names = codec.opaque_invite_self_test()
+        except Exception as exc:  # noqa: BLE001
+            write("  FAILED   %-36s %s: %s\n" % (codec_gated, type(exc).__name__, exc))
+            return 1
+        total += len(names)
+        write("  ok       %-36s %d checks\n" % (codec_gated, len(names)))
+
     # The HTTP group needs the wheels for a different reason than the crypto one: its
     # subject *is* the ASGI app. Without FastAPI there is no router to send a request
     # to, so the two defects it exists for — an annotation FastAPI could not resolve,
@@ -6130,7 +6652,7 @@ def _self_test_extra(protocol_checks: List[str]) -> int:
         return 1
     write(
         "self-test: %d checks passed across %d groups\n"
-        % (total, len(SELF_TEST_MODULES) + 3 - len(skipped) - len(missing))
+        % (total, len(SELF_TEST_MODULES) + 4 - len(skipped) - len(missing))
     )
     if skipped:
         write("self-test: %d group(s) skipped on this interpreter: %s\n" % (len(skipped), "; ".join(skipped)))

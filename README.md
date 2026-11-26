@@ -56,8 +56,8 @@ popopx-service-suite/
 - 起服务要 Python 3.11 加 `gateway/requirements.txt` 里的 wheel。没装这些 wheel 的机器上并
   没有「降级 HTTP 路径」这回事：`create_app()` 直接抛 `RuntimeError: FastAPI is not installed;
   run ./start_macos.sh, ./install_macos.sh or ./install_ubuntu22.sh first`（后面拼 `ImportError` 原文，见
-  `gateway/app/main.py:3109`）。这种机器能做的是跑 18 组自检里的 16 组——运行器会把依赖那两个
-  wheel 的组点名 `SKIPPED`。下面「自检」里的 **2497 条 / 16 组** 就是这么来的，它不是一台正在
+  `gateway/app/main.py:3109`）。这种机器能做的是跑 19 组自检里的 16 组——运行器会把依赖那两个
+  wheel 的组点名 `SKIPPED`。下面「自检」里的 **2514 条 / 16 组** 就是这么来的，它不是一台正在
   应答的网关。
 - 需要一个正在运行的 `popopx-agent` / `popopx-chat` 节点，它的 WebSocket 控制口在
   `127.0.0.1:5225`。没有节点也能起服务，见下面「启动行为与插件开关」。
@@ -150,7 +150,7 @@ Crashed=true}`、`RestartSec=3`→`ThrottleInterval=3`（那是最短间隔的�
 本机离线实测到的：`--help`、`--check`、`--dry-run`（含 `--with-node`）全部退出 0，两个 plist
 `plutil -lint` 通过，dry-run 里"已存在的 env 逐字节不变、只多一个 `.bak.<utc>`"这条由 cksum 现场
 证明；`brew` 装的 Python 3.11.18 过了版本门，用它按 `gateway/requirements.txt` 实装依赖建一个 venv，
-`--self-test` 实测 **2531 条 / 18 组、exit 0**（这一跑顺手揪出一个只在新版 starlette 上失明的 HTTP
+`--self-test` 实测 **2619 条 / 19 组、exit 0**（这一跑顺手揪出一个只在新版 starlette 上失明的 HTTP
 量具，见「自检」）。
 
 带 sudo 的真装真起 **2026-11-22 在这台 Mac 上跑过了**：`/Library/LaunchDaemons/com.popopx.gateway.plist`
@@ -308,7 +308,24 @@ curl -s -X POST "$API/api/v1/channels/$CHANNEL_ID/rotate" -H "X-Admin-Token: $TO
 # 5. 插件状态（控制台八个面板读的就是这一条）
 curl -s $API/api/v1/plugins -H "X-Admin-Token: $TOKEN"
 curl -s $API/api/v1/plugins/alert_ops/status -H "X-Admin-Token: $TOKEN"
+
+# 6. opaque 邀请链接：服务号名片 / 零知识频道，默认连同 SVG 二维码一起返回
+curl -s -X POST $API/api/v1/invite-links -H "X-Admin-Token: $TOKEN" \
+     -H 'content-type: application/json' -d '{}'
+curl -s -X POST $API/api/v1/invite-links -H "X-Admin-Token: $TOKEN" \
+     -H 'content-type: application/json' \
+     -d '{"kind":"channel","channel_id":"'"$CHANNEL_ID"'"}'
+curl -s "$API/api/v1/invite-links/audit?limit=20" -H "X-Admin-Token: $TOKEN"
 ```
+
+对外分享的字段是 `contact_link`（服务号）与 `invite_link`（频道），形如
+`https://popopx.chat/i/v1/<Base64URL>`：原始连接 URI 被封进 ChaCha20-Poly1305 信封，链接与 `qr_svg`
+都不含 `smpN.popopx.im` 中继域名。`contact_address` / `public_uri` 原样保留，只有控制台的
+「高级诊断：查看原始协议地址」才展示。格式密钥是**公开常量**（HKDF-SHA256 从公布的 IKM 派生），
+所以这层保护的是链接预览、截图和随手转发，不是对读到源码者的机密性。`POST /api/v1/invite-links`
+只封装网关自己持有的 URI——它忽略 body 里的 `uri`，否则就成了一个用 `popopx.chat` 域名替别人签字的
+钓鱼工具；响应带 `link`、`masked`、`created_at_ms`、`cached` 与 `qr_svg`。`GET /api/v1/invite-links/audit`
+只列生成时间、类型、对象 id 和 10 字符前缀：审计表里没有能装下完整密文或原始 URI 的列。
 
 空 body 一律按 `{}` 处理（`json_body`），所以轮换那条可以不发 body；它的开关是
 `expires_at_ms`、`revoke_previous`（默认 true）、`notify_members`（默认 true），
@@ -318,7 +335,7 @@ curl -s $API/api/v1/plugins/alert_ops/status -H "X-Admin-Token: $TOKEN"
 
 ## 接口一览
 
-116 条路由。本文件声明的 53 条由 `python3 -m app.main --print-routes` 打印，同一条命令顺手断言
+118 条路由。本文件声明的 55 条由 `python3 -m app.main --print-routes` 打印，同一条命令顺手断言
 "每条管理路由都被 token 盖住"；八个插件另贡献 63 条（`workflow_webhook` 12、`alert_ops` 10、
 `web3_bridge` 9、`polls` 8、`ai_agent` 6、`privacy_sso` 6、`carddav_connector` 6、
 `caldav_connector` 6），它们走 `include_router` 进来，`--print-routes` 看不见，
@@ -330,7 +347,7 @@ curl -s $API/api/v1/plugins/alert_ops/status -H "X-Admin-Token: $TOKEN"
 不解析 `Authorization: Bearer`——全套件只有 `privacy_sso` 的设备侧路由读它
 （`privacy_sso_plugin.py:1521` `bearer_secret`），`alert_ops` 的控制台路由读
 `X-Popopx-Admin-Token`（`alert_ops_plugin.py:1105`）。管理后台三个头一起发
-（`gateway/app/static/index.html:620`–`:622`），一个令牌不用按路由切换。五类例外：
+（`gateway/app/static/index.html:623`–`:627`），一个令牌不用按路由切换。五类例外：
 `/`、`/healthz`、`/h5/{article_id}` 公开；
 `POST /api/v1/verifyH5Auth` 靠手机侧的 HMAC 签名证明调用者；`POST /api/v1/workflows/trigger`
 只认 `X-PPX-Workflow-Token`（带过期、可撤销、按 scope 拒绝），管理令牌对它是无意义的；插件路径以 `/webhook`、`/verify`、
@@ -378,7 +395,7 @@ macOS 在 `/usr/local/etc/popopx-service-suite/env`——launchd 没有 `Environ
 
 ## 自检
 
-每个模块都自带 `self_test()`，共 18 组，用下面这条命令一次性跑完：
+每个模块都自带 `self_test()`，共 19 组，用下面这条命令一次性跑完：
 
 ```bash
 # 两个代码块都从仓库根目录起跑
@@ -390,14 +407,16 @@ token 盖住的_admin 路由就不该开始监听），完整套件是开发/发
 `start_macos.sh`、`install_macos.sh` 与 `install_ubuntu22.sh` 在最后一步打印出来供复制。
 
 权威计数是这条命令自己打出来的最后一行。本机 2026-11-26 用 `/usr/bin/python3` 跑只有标准库那一档
-（`cryptography` 和 `fastapi` 都没装），实测是 **2497 条 / 16 组**：`app.crypto_service.crypto_self_test`（缺 `cryptography`）和
-`app.main.http_self_test`（缺 `fastapi`）两组被运行器点名 `SKIPPED`，并打印 "those paths are NOT
-verified here"——这两组在本机一条都没跑过，不是"跑过了没记上"。同一台机器上换一个装了
-`gateway/requirements.txt` 的 venv 再跑，实测 **2531 条 / 18 组**，多出来的正是那两组：运行器逐组打印
-`crypto_self_test 6 checks` 与 `http_self_test 28 checks`，18 组之和恰好等于总行
-（2497 + 6 + 28 = 2531），所以你机器上那一行也能这样拆开对账。上面每一档都在 2026-11-26 重测过：
-仓库 `.venv` 的 3.9.6（fastapi 0.128.8）与 `brew` 装的 3.11.18 各建一个 venv，两边同为
-**2531 条 / 18 组、exit 0**。新增的四组是 `app.connectors`（34）、`workflow_webhook_plugin`
+（`cryptography` 和 `fastapi` 都没装），实测是 **2514 条 / 16 组**：`app.crypto_service.crypto_self_test`（缺 `cryptography`）、
+`app.opaque_invite_codec.opaque_invite_self_test`（同样缺 `cryptography`）和 `app.main.http_self_test`（缺 `fastapi`）
+三组被运行器点名 `SKIPPED`，并打印 "those paths are NOT verified here"——这三组在本机一条都没跑过，不是"跑过了没记上"。
+同一台机器上换一个装了 `gateway/requirements.txt` 的 venv 再跑，实测 **2619 条 / 19 组**，多出来的正是那三组：
+运行器逐组打印 `crypto_self_test 6 checks`、`http_self_test 49 checks` 与
+`opaque_invite_codec.opaque_invite_self_test 50 checks`，19 组之和恰好等于总行
+（2514 + 6 + 49 + 50 = 2619），所以你机器上那一行也能这样拆开对账。协议层在两种解释器下都是同样的 307 条：
+缺少 `cryptography` 时新增的 invite 断言改为验证 `invite_crypto_unavailable` 这一具名降级答复，而不是悄悄跳过。
+上面每一档都在 2026-11-26 重测过：仓库 `.venv` 的 3.9.6（fastapi 0.128.8）与 `brew` 装的 3.11.18 各建一个 venv，
+两边同为 **2619 条 / 19 组、exit 0**。连接器那四组是 `app.connectors`（34）、`workflow_webhook_plugin`
 （57）、`carddav_connector`（43）、`caldav_connector`（48）；它们把 HMAC/SSRF、令牌过期与
 撤销、vCard 敏感字段剥离、CalDAV 标题零泄漏都放进了可执行断言。后一次不是重复劳动：`requirements.txt`
 钉的是区间，新 venv 因此拿到 fastapi 0.165.0 + starlette 1.10.0，而 starlette 1.x 的
@@ -421,7 +440,7 @@ verified here"——这两组在本机一条都没跑过，不是"跑过了没�
 # 同样从仓库根目录（跑过上一块就先 cd ..）
 python3.11 -m venv .venv                      # 3.11 是这套件的目标解释器，见 requirements.txt 头几行
 .venv/bin/pip install -r gateway/requirements.txt
-cd gateway && ../.venv/bin/python -m app.main --self-test   # 18 组全绿、无 SKIPPED（本机实测 2531 条）
+cd gateway && ../.venv/bin/python -m app.main --self-test   # 19 组全绿、无 SKIPPED（本机实测 2619 条）
 ```
 
 ## 跨实现密码学校验
@@ -443,6 +462,18 @@ cd gateway && python3 -m app.crypto_service emit /tmp/py.json && cd ..
 
 `--tamper aad` 是唯一签名有效的那条伪造，只有它会检验 AAD 是否真的在干活。fixture 里的
 密钥每次现生成，信封私钥不落盘。
+
+opaque invite 也有一条同样的对端校验。`official_tools/swift_opaque_invite_oracle.swift` 读取
+`gateway/app/opaque_invite_vectors.json` 公布的 HKDF 参数与两条向量（服务号、频道），用 CryptoKit
+重算密钥与 ChaCha20-Poly1305 密文并逐字节比对，再验证解码、无明文残留和翻转 tag 被拒；Python 侧
+`opaque_invite_self_test` 的 50 条断言与它共用同一份 JSON。向量文件放在 `gateway/app/` 里，
+因为 Dockerfile 只复制这个目录：
+
+```bash
+swiftc -O -o /tmp/opaque_invite_oracle official_tools/swift_opaque_invite_oracle.swift
+/tmp/opaque_invite_oracle gateway/app/opaque_invite_vectors.json
+# PASS opaque invite v1: 2 vectors, 2 URI kinds, CryptoKit agrees
+```
 
 ## 算力码
 

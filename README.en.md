@@ -64,8 +64,8 @@ popopx-service-suite/
   not installed; run ./start_macos.sh, ./install_macos.sh or ./install_ubuntu22.sh first`, with
   the `ImportError`
   text appended (`gateway/app/main.py:3109`). What a standard-library-only machine *can* do is
-  run 16 of the 18 self-test groups, because the runner names the two that import those wheels
-  as `SKIPPED` — that is what the **2497 checks across 16 groups** figure below is, and it is
+  run 16 of the 19 self-test groups, because the runner names the three that need those wheels
+  as `SKIPPED` — that is what the **2514 checks across 16 groups** figure below is, and it is
   not a gateway answering requests.
 - A running `popopx-agent` / `popopx-chat` node exposing its WebSocket control API on
   `127.0.0.1:5225`.
@@ -185,7 +185,7 @@ Measured offline on this machine: `--help`, `--check` and `--dry-run` (including
 all exit 0, both plists pass `plutil -lint`, and the dry-run proves with `cksum` that a
 pre-existing env file survives byte-identical with one `.bak.<utc>` added. `brew`'s Python 3.11.18
 passes the interpreter gate, and a venv built from it with `gateway/requirements.txt` actually
-installed measures **2531 checks across 18 groups, exit 0** on `--self-test` (that run also caught
+installed measures **2619 checks across 19 groups, exit 0** on `--self-test` (that run also caught
 an HTTP instrument that goes blind only on the newer starlette — see **Self-test** below).
 
 The sudo install that really starts the service **was run on this Mac on 2026-11-22**:
@@ -352,7 +352,7 @@ core's `admin_required` reads only `x-admin-token` or `?token=`
 place that does is `privacy_sso`'s device-facing route (`privacy_sso_plugin.py:1521`
 `bearer_secret`); `alert_ops`' console routes read `X-Popopx-Admin-Token`
 (`alert_ops_plugin.py:1105`). The console sends all three at once
-(`gateway/app/static/index.html:620`–`:622`) so one token works whichever route it lands on.
+(`gateway/app/static/index.html:623`–`:627`) so one token works whichever route it lands on.
 Field names below are the ones the handlers read.
 
 ```bash
@@ -383,7 +383,28 @@ curl -s -X POST "$API/api/v1/channels/$CHANNEL_ID/rotate" -H "X-Admin-Token: $TO
 # 5. Plugin state
 curl -s $API/api/v1/plugins -H "X-Admin-Token: $TOKEN"
 curl -s $API/api/v1/plugins/alert_ops/status -H "X-Admin-Token: $TOKEN"
+
+# 6. Opaque invite links: service-account card or zero-knowledge channel, QR by default
+curl -s -X POST $API/api/v1/invite-links -H "X-Admin-Token: $TOKEN" \
+     -H 'content-type: application/json' -d '{}'
+curl -s -X POST $API/api/v1/invite-links -H "X-Admin-Token: $TOKEN" \
+     -H 'content-type: application/json' \
+     -d '{"kind":"channel","channel_id":"'"$CHANNEL_ID"'"}'
+curl -s "$API/api/v1/invite-links/audit?limit=20" -H "X-Admin-Token: $TOKEN"
 ```
+
+The fields to share are `contact_link` (service account) and `invite_link` (channel), shaped like
+`https://popopx.chat/i/v1/<Base64URL>`: the raw connection URI is sealed in a
+ChaCha20-Poly1305 envelope, and neither the link nor `qr_svg` contains the `smpN.popopx.im` relay
+host. `contact_address` / `public_uri` are kept verbatim and shown only under the console's
+"高级诊断：查看原始协议地址" fold. The format key is a **published constant** (HKDF-SHA256 over
+the published IKM), so what this protects is link previews, screenshots and casual forwarding, not
+confidentiality against someone who reads the source. `POST /api/v1/invite-links` seals only URIs
+the gateway owns — it ignores a `uri` in the body, which would otherwise make it a phishing
+oracle signing somebody else's string under the `popopx.chat` domain; the response carries
+`link`, `masked`, `created_at_ms`, `cached` and `qr_svg`. `GET /api/v1/invite-links/audit` lists
+only generation time, kind, subject id and a 10-character prefix: the audit table has no column
+able to hold a full ciphertext or a raw URI.
 
 `POST /api/v1/channels/{channel_id}/rotate` takes `expires_at_ms`, `revoke_previous` (default
 true) and `notify_members` (default true), and it is charged `key_rotation` **per member** —
@@ -394,7 +415,7 @@ asked at all.
 
 ## API overview
 
-116 routes. The 53 declared in this file's tree are printed by
+118 routes. The 55 declared in this file's tree are printed by
 `python3 -m app.main --print-routes`, which also asserts that every admin route is covered by
 the token. The eight plugins add the other 63 (`workflow_webhook` 12, `alert_ops` 10,
 `web3_bridge` 9, `polls` 8, `ai_agent` 6, `privacy_sso` 6, `carddav_connector` 6,
@@ -460,7 +481,7 @@ non-boolean switch. Unrecognised `POPOPX_*` keys are ignored, not an error.
 
 ## Self-test
 
-Every module ships a `self_test()`; 18 groups in total, run in one command:
+Every module ships a `self_test()`; 19 groups in total, run in one command:
 
 ```bash
 # from the repository root
@@ -474,17 +495,21 @@ copying as the last step by `start_macos.sh`, `install_macos.sh` and `install_ub
 
 The authoritative count is the last line that command prints. On this machine on 2026-11-26
 `/usr/bin/python3` has only the standard library (no `cryptography`, no `fastapi`), and the
-measured result was **2497 checks across 16 groups**: `app.crypto_service.crypto_self_test` (needs
-`cryptography`) and `app.main.http_self_test` (needs `fastapi`) were named as `SKIPPED` by the
-runner, which prints "those paths are NOT verified here" — those two groups ran zero checks
-here, which is not the same as having run and not been counted. Re-running on the same machine
-inside a venv that has `gateway/requirements.txt` installed measured **2531 checks across 18
-groups**, and the difference is exactly those two groups: the runner prints
-`crypto_self_test 6 checks` and `http_self_test 28 checks` per group, and the 18 group figures
-sum to the total line (2497 + 6 + 28 = 2531), so you can audit your own run the same way. Every
-figure above was re-measured on 2026-11-26: the repository `.venv`'s 3.9.6 (fastapi 0.128.8) and a
-fresh venv built from `brew`'s Python 3.11.18 both measure **2531 checks across 18 groups, exit 0**.
-The four new groups are `app.connectors` (34), `workflow_webhook_plugin` (57),
+measured result was **2514 checks across 16 groups**: `app.crypto_service.crypto_self_test` (needs
+`cryptography`), `app.opaque_invite_codec.opaque_invite_self_test` (also `cryptography`) and
+`app.main.http_self_test` (needs `fastapi`) were named as `SKIPPED` by the runner, which prints
+"those paths are NOT verified here" — those three groups ran zero checks here, which is not the
+same as having run and not been counted. Re-running on the same machine inside a venv that has
+`gateway/requirements.txt` installed measured **2619 checks across 19 groups**, and the
+difference is exactly those three groups: the runner prints `crypto_self_test 6 checks`,
+`http_self_test 49 checks` and `opaque_invite_codec.opaque_invite_self_test 50 checks` per
+group, and the 19 group figures sum to the total line (2514 + 6 + 49 + 50 = 2619), so you can
+audit your own run the same way. The protocol layer is the same 307 checks on both interpreters:
+without `cryptography` the new invite assertions verify the named `invite_crypto_unavailable`
+degradation instead of being skipped. Every figure above was re-measured on 2026-11-26: the
+repository `.venv`'s 3.9.6 (fastapi 0.128.8) and a fresh venv built from `brew`'s Python 3.11.18
+both measure **2619 checks across 19 groups, exit 0**.
+The four connector groups are `app.connectors` (34), `workflow_webhook_plugin` (57),
 `carddav_connector` (43) and `caldav_connector` (48); HMAC/SSRF refusal, token expiry and
 revocation, vCard stripping and zero CalDAV title leakage are executable assertions.
 The second one was not a formality: `requirements.txt` pins ranges, so the new venv resolved
@@ -518,7 +543,7 @@ tell a mounted route from a route that merely exists in source.
 # Still from the repository root (cd .. if the block above left you in gateway/)
 python3.11 -m venv .venv                      # 3.11 is the suite's target interpreter
 .venv/bin/pip install -r gateway/requirements.txt
-cd gateway && ../.venv/bin/python -m app.main --self-test   # 18 groups green, no SKIPPED (2531 here)
+cd gateway && ../.venv/bin/python -m app.main --self-test   # 19 groups green, no SKIPPED (2619 here)
 ```
 
 ## Cross-implementation crypto check
@@ -542,6 +567,20 @@ cd gateway && python3 -m app.crypto_service emit /tmp/py.json && cd ..
 `--tamper aad` is the only forgery whose signature is still valid, so it is the only one that
 tests whether the AAD is actually doing work. Fixture keys are generated per run; no envelope
 private key touches disk.
+
+Opaque invite links have the same kind of counterpart check.
+`official_tools/swift_opaque_invite_oracle.swift` reads the HKDF parameters and the two published
+vectors (service account, channel) from `gateway/app/opaque_invite_vectors.json`, recomputes the
+key and the ChaCha20-Poly1305 ciphertext with CryptoKit, compares them byte for byte, then checks
+decoding, absence of plaintext and rejection of a flipped tag; the 50 assertions in Python's
+`opaque_invite_self_test` share that same JSON. The vector file lives under `gateway/app/` because
+the Dockerfile copies only that directory:
+
+```bash
+swiftc -O -o /tmp/opaque_invite_oracle official_tools/swift_opaque_invite_oracle.swift
+/tmp/opaque_invite_oracle gateway/app/opaque_invite_vectors.json
+# PASS opaque invite v1: 2 vectors, 2 URI kinds, CryptoKit agrees
+```
 
 ## Compute vouchers (POPX-CP)
 

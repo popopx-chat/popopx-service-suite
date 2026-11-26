@@ -98,6 +98,10 @@ h4.sub:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
 .empty { color: var(--fg-3); font-size: 12.5px; margin: 2px 0 0; font-style: italic; }
 .hint { color: var(--fg-3); font-size: 11.5px; }
 .warnline { color: var(--warn); font-size: 12px; }
+.adv { margin-top: 8px; }
+.adv > summary { cursor: pointer; color: var(--fg-3); font-size: 12px; }
+.adv > div { margin-top: 8px; }
+img.qr { display: block; width: 180px; height: 180px; background: #fff; padding: 8px; border-radius: 10px; }
 
 /* ── controls ──────────────────────────────────────────────────────────── */
 .in {
@@ -322,6 +326,8 @@ var API = {
 
   /* —— 频道 —— */
   channels:     ["GET", "/api/v1/channels"],
+  inviteLink:   ["POST", "/api/v1/invite-links"],
+  inviteAudit:  ["GET", "/api/v1/invite-links/audit"],
   channelCreate:["POST", "/api/v1/channels"],
   channelGet:   ["GET", "/api/v1/channels/{channel_id}"],
   channelUri:   ["PUT", "/api/v1/channels/{channel_id}/uri"],
@@ -846,6 +852,21 @@ function copyBtn(get, label) {
 function linkMono(text, href) {
   return h("a", { class: "mono", href: href || text, target: "_blank", rel: "noopener noreferrer", text: text || "—" });
 }
+/* 服务端生成的 SVG 以 data: URL 加载为 <img>：不把服务端 HTML 注入 DOM，二维码里
+ * 即使出现标记也不会被当作可执行内容。 */
+function qrImage(svg, alt) {
+  if (!svg) return h("p", { class: "warnline", text: "二维码不可用" });
+  return h("img", { class: "qr", alt: alt || "二维码", src: "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg) });
+}
+function diagnostics(label, content) {
+  return h("details", { class: "adv" }, h("summary", { text: label }), h("div", {}, content));
+}
+function inviteLinkRow(info, getLink) {
+  if (!info) return chip("尚未生成", "w");
+  return h("div", { class: "row" },
+    h("code", { class: "mono", title: info, text: short(info, 30, 10) }),
+    copyBtn(function () { return getLink ? getLink() : info; }, "复制邀请链接"));
+}
 function tableOf(cols, rows, empty) {
   if (!rows || !rows.length) return h("p", { class: "empty", text: empty || "（无数据）" });
   var head = h("tr", {}, cols.map(function (c) { return h("th", { text: c.label }); }));
@@ -1169,7 +1190,23 @@ VIEWS.overview = function (host) {
   var billS = section("算力", "POPX-CP：默认开箱即用；兑换即入账，开启准入后耗尽即熔断插件");
   var reachS = section("触达与存储", "各表行数取自 GET /api/v1/status 的 counts");
   var plugS = section("插件", "八个插件的装载、开关与熔断状态", [btn("插件详情", function () { location.hash = "#ai"; return null; }, { tone: "mini gho" })]);
-  [svcS, nodeS, billS, reachS, plugS].forEach(function (s) { host.appendChild(s.node); });
+  var auditS = section("邀请链接审计", "只保留脱敏前缀与生成时间，不保存密文或明文地址");
+  var auditOut = h("div");
+  auditS.body.appendChild(h("div", { class: "row" },
+    btn("读取最近 50 条", function () {
+      return call("inviteAudit", { query: { limit: 50 } }).then(function (r) {
+        clear(auditOut);
+        auditOut.appendChild(tableOf([
+          { label: "时间", get: function (e) { return h("span", { class: "num", title: localDate(e.created_at_ms), text: ago(e.created_at_ms) }); } },
+          { label: "类型", get: function (e) { return e.kind === "channel" ? "频道订阅" : "服务号名片"; } },
+          { label: "对象", get: function (e) { return h("span", { class: "mono", text: e.subject_id }); } },
+          { label: "脱敏前缀", get: function (e) { return h("span", { class: "mono", text: String(e.code_prefix || "") + "…" }); } }
+        ], r.entries || [], "（尚无生成记录）"));
+        return r;
+      });
+    }, { tone: "mini" })));
+  auditS.body.appendChild(auditOut);
+  [svcS, nodeS, billS, reachS, plugS, auditS].forEach(function (s) { host.appendChild(s.node); });
 
   async function refresh() {
     await loadStatus();
@@ -1179,21 +1216,43 @@ VIEWS.overview = function (host) {
 
     var st = STATE.status || {}, svc = st.service || {}, node = st.node || {}, out = st.outbox || {};
     clear(svcS.body);
+    var contactQr = h("div");
     svcS.body.appendChild(kv([
       ["service_id", h("span", { class: "mono", text: svc.service_id || "—" })],
       ["显示名", svc.display_name],
       ["对外地址", h("a", { href: svc.public_base_url, target: "_blank", rel: "noopener noreferrer", class: "mono", text: svc.public_base_url || "—" })],
-      ["联系人地址", h("div", { class: "row" }, h("code", { class: "mono", text: svc.contact_address || "尚未申请" }),
-        svc.contact_address ? copyBtn(function () { return svc.contact_address; }) : null)],
+      ["邀请链接", svc.contact_link ? inviteLinkRow(svc.contact_link) : chip(svc.contact_link_error || "尚未生成", "w")],
+      ["订阅二维码", h("div", {},
+        h("div", { class: "row" },
+          btn("生成二维码", function () {
+            return call("inviteLink", { body: { kind: "service_account" } }).then(function (r) {
+              clear(contactQr);
+              contactQr.appendChild(qrImage(r.qr_svg, "服务号名片二维码"));
+              if (r.qr_error) contactQr.appendChild(h("p", { class: "warnline", text: "二维码不可用：" + r.qr_error }));
+              return r;
+            });
+          }, { tone: "mini gho" }),
+          svc.contact_link ? copyBtn(function () { return svc.contact_link; }, "复制邀请链接") : null),
+        contactQr)],
       ["网关版本", st.version],
       ["节点 ws", node.ws_url]
     ]));
+    svcS.body.appendChild(diagnostics("高级诊断：查看原始协议地址",
+      h("div", {},
+        h("p", { class: "hint", text: "原始地址含中继服务器域名，仅供运维排查；对外请使用上方邀请链接。" }),
+        h("code", { class: "mono", text: svc.contact_address || "尚未申请" }),
+        svc.contact_address ? copyBtn(function () { return svc.contact_address; }, "复制原始地址") : null)));
     if (!svc.contact_address) svcS.body.appendChild(h("p", { class: "warnline", text: "还没有可扫描的联系人地址：到「服务号与节点」申请一个。" }));
+    else if (!svc.contact_link) svcS.body.appendChild(h("p", { class: "warnline", text: "邀请链接尚未生成：" + (svc.contact_link_error || "未知原因") }));
 
     clear(nodeS.body);
     var known = ["connected", "ws_url", "user_id", "contact_address", "pending_commands"];
     var rows = [["连接", chip(node.connected ? "在线" : "离线", node.connected ? "g" : "b")]]
-      .concat(known.slice(1).map(function (k) { return [k, String(node[k] === undefined ? "—" : node[k])]; }))
+      .concat(known.slice(1).map(function (k) {
+        return [k, k === "contact_address"
+          ? (node[k] ? h("span", { class: "hint", text: "已隐藏，见上方高级诊断" }) : "—")
+          : String(node[k] === undefined ? "—" : node[k])];
+      }))
       .concat(rest(node, known));
     nodeS.body.appendChild(kv(rows));
 
@@ -1307,23 +1366,40 @@ VIEWS.node = function (host) {
     await loadStatus();
     var svc = (STATE.status || {}).service || {};
     clear(idS.body);
+    var qrOut = h("div");
     idS.body.appendChild(kv([
       ["service_id", h("span", { class: "mono", text: svc.service_id })],
       ["显示名", svc.display_name],
       ["对外地址", h("a", { href: svc.public_base_url, target: "_blank", rel: "noopener noreferrer", class: "mono", text: svc.public_base_url })],
-      ["联系人地址", h("div", { class: "row" }, h("code", { class: "mono", text: svc.contact_address || "（未申请）" }),
-        svc.contact_address ? copyBtn(function () { return svc.contact_address; }) : null)]
+      ["邀请链接", svc.contact_link ? inviteLinkRow(svc.contact_link) : chip(svc.contact_link_error || "尚未生成", "w")],
+      ["订阅二维码", h("div", {},
+        h("div", { class: "row" },
+          btn("生成二维码", function () {
+            return call("inviteLink", { body: { kind: "service_account" } }).then(function (r) {
+              clear(qrOut);
+              qrOut.appendChild(qrImage(r.qr_svg, "服务号名片二维码"));
+              if (r.qr_error) qrOut.appendChild(h("p", { class: "warnline", text: "二维码不可用：" + r.qr_error }));
+              return r;
+            });
+          }, { tone: "mini gho" }),
+          svc.contact_link ? copyBtn(function () { return svc.contact_link; }, "复制邀请链接") : null),
+        qrOut)]
     ]));
+    idS.body.appendChild(diagnostics("高级诊断：查看原始协议地址",
+      h("div", {},
+        h("p", { class: "hint", text: "原始地址含中继服务器域名，仅供运维排查；对外请使用上方邀请链接。" }),
+        h("code", { class: "mono", text: svc.contact_address || "（未申请）" }),
+        svc.contact_address ? copyBtn(function () { return svc.contact_address; }, "复制原始地址") : null)));
     var row = h("div", { class: "row" });
     row.appendChild(btn("申请/复用地址", function () {
       return call("nodeAddress", { body: {} }).then(function (r) {
-        out1.appendChild(resultBox("地址", r));
+        out1.appendChild(resultBox("地址", { ok: r.ok, contact_link: r.contact_link, contact_link_error: r.contact_link_error }));
         return loadStatus().then(function () { refreshId(); paintBar(); });
       });
     }, { out: function () { return out1; }, tone: "pri" }));
     row.appendChild(btn("轮换地址", function () {
       return call("nodeAddress", { body: { rotate: true } }).then(function (r) {
-        out1.appendChild(resultBox("已轮换", r));
+        out1.appendChild(resultBox("已轮换", { ok: r.ok, contact_link: r.contact_link, contact_link_error: r.contact_link_error }));
         return loadStatus().then(function () { refreshId(); });
       });
     }, { out: function () { return out1; }, tone: "dan",
@@ -1946,7 +2022,7 @@ VIEWS.cards = function (host) {
  * ======================================================================== */
 
 VIEWS.channels = function (host) {
-  var listS = section("频道", "identity_sec 永不离开网关；对外只给 public_uri");
+  var listS = section("频道", "identity_sec 永不离开网关；对外默认只给不透明邀请链接");
   var newS = section("新建频道", "relay 是节点群组所在的服务器主机名");
   var detS = section("频道详情", "选择左侧任一行");
   [listS, newS, detS].forEach(function (x) { host.appendChild(x.node); });
@@ -1967,8 +2043,12 @@ VIEWS.channels = function (host) {
       if (idIn.value.trim()) body.channel_id = idIn.value.trim();
       if (String(groupIn.value || "").trim()) body.node_group_id = Number(groupIn.value);
       return call("channelCreate", { body: body }).then(function (r) {
-        newOut.appendChild(resultBox("已创建", r));
-        toast("频道已创建，public_uri 在结果里", "good");
+        /* 结果框默认只展示可对外分发的邀请链接；原始 relay/public_uri 在详情页的
+         * 「高级诊断」里，避免截图或转发调试输出时把中继域名带出去。 */
+        newOut.appendChild(resultBox("已创建", {
+          ok: r.ok, channel_id: (r.channel || {}).channel_id, invite_link: r.invite_link, epochs: r.epochs
+        }));
+        toast("频道已创建，邀请链接在结果里", "good");
         return refreshList();
       });
     }, { tone: "pri", out: function () { return newOut; } })));
@@ -1977,11 +2057,11 @@ VIEWS.channels = function (host) {
   var cols = [
     { label: "channel_id", get: function (r) { return h("a", { href: "#", class: "mono", text: r.channel_id, on: { click: function (e) { e.preventDefault(); show(r.channel_id); } } }); } },
     { label: "标题", k: "title" },
-    { label: "relay", get: function (r) { return r.relay ? h("span", { class: "mono", text: r.relay }) : chip("无 relay", "w"); } },
+    { label: "relay", get: function (r) { return r.relay ? chip("已设置", "g") : chip("未设置", "w"); } },
     { label: "epoch", get: function (r) { return h("span", { class: "num", text: String(r.current_epoch === undefined ? "—" : r.current_epoch) }); } },
     { label: "创建", get: function (r) { return ago(r.created_at_ms); } },
     { label: "上次轮换", get: function (r) { return r.rotated_at_ms ? ago(r.rotated_at_ms) : "从未"; } },
-    { label: "公开 URI", get: function (r) { return r.public_uri ? h("div", { class: "row" }, h("code", { class: "mono", title: r.public_uri, text: short(r.public_uri, 22, 8) }), copyBtn(function () { return r.public_uri; }, "复制")) : chip("需要 relay", "w"); } }
+    { label: "邀请链接", get: function (r) { return r.invite_link ? inviteLinkRow(r.invite_link) : chip(r.invite_link_error || "需要 relay", "w"); } }
   ];
   function refreshList() {
     return loadChannels(true).then(function (rows) {
@@ -1997,29 +2077,50 @@ VIEWS.channels = function (host) {
     selected = String(channelId);
     var r = await call("channelGet", { params: { channel_id: selected } });
     clear(detS.body);
-    var ch = r.channel || {}, uri = r.public_uri || "";
+    var ch = r.channel || {}, rawUri = r.public_uri || "", link = ch.invite_link || r.invite_link || "";
+    var detOut = h("div");
+    var qrOut = h("div");
     var head = h("div", { class: "grid2" },
       h("div", {}, kv([
         ["channel_id", h("span", { class: "mono", text: ch.channel_id })],
         ["title", ch.title],
-        ["relay", h("span", { class: "mono", text: ch.relay || "（未设置）" })],
+        ["relay", ch.relay ? chip("已设置", "g") : chip("未设置", "w")],
         ["current_epoch", h("span", { class: "num", text: String(ch.current_epoch) })],
         ["identity_pub", h("span", { class: "mono", title: ch.identity_pub_b64url, text: short(ch.identity_pub_b64url, 18, 8) })],
         ["node_group_id", String(ch.node_group_id === undefined ? "—" : ch.node_group_id)]
       ])),
       h("div", {},
-        field("public_uri（给新成员导入的唯一入口）", h("textarea", { class: "in mono", rows: 3, readonly: true, value: uri || "（缺少 relay，无法生成）" }),
+        field("邀请链接（给新成员导入的唯一入口）", h("textarea", { class: "in mono", rows: 3, readonly: true, value: link || "（缺少 relay，无法生成）" }),
           "导入只创建 epoch 1；之后的每个 epoch 由密钥帧送达"),
         h("div", { class: "row", style: "margin-top:8px" },
-          copyBtn(function () { return uri; }, "复制 URI"),
+          copyBtn(function () { return link; }, "复制邀请链接"),
+          btn("生成二维码", function () {
+            return call("inviteLink", { body: { kind: "channel", channel_id: selected } }).then(function (res) {
+              clear(qrOut);
+              qrOut.appendChild(qrImage(res.qr_svg, "频道订阅二维码"));
+              if (res.qr_error) qrOut.appendChild(h("p", { class: "warnline", text: "二维码不可用：" + res.qr_error }));
+              return res;
+            });
+          }, { tone: "mini gho" }),
           btn("修改 relay", function () {
             var value = window.prompt("新的 relay 主机名（不含 @ 与路径）：", ch.relay || "");
             if (value === null) return null;
             return call("channelUri", { params: { channel_id: selected }, body: { relay: value.trim() } })
-              .then(function (res) { detOut.appendChild(resultBox("relay 已更新", res)); return refreshList(); });
+              .then(function (res) {
+                detOut.appendChild(resultBox("relay 已更新", { ok: res.ok, invite_link: res.invite_link }));
+                return refreshList();
+              });
           }, { tone: "mini" }),
-          btn("重新生成 URI", function () { return call("channelGet", { params: { channel_id: selected } }).then(function (res) { detOut.appendChild(resultBox("当前 URI", { public_uri: res.public_uri })); }); }, { tone: "mini gho" }))));
+          btn("刷新链接", function () { return show(selected); }, { tone: "mini" })),
+        qrOut,
+        diagnostics("高级诊断：查看原始协议地址",
+          h("div", {},
+            h("p", { class: "hint", text: "原始 URI 含中继服务器域名，仅供运维排查；对外请使用上方邀请链接。" }),
+            h("code", { class: "mono", text: rawUri || "（缺少 relay，无法生成）" }),
+            copyBtn(function () { return rawUri; }, "复制原始 URI"),
+            h("p", { class: "hint", text: "relay：" + (ch.relay || "（未设置）") })))));
     detS.body.appendChild(head);
+    detS.body.appendChild(detOut);
 
     /* —— 密钥轮换 —— */
     var rotExp = inp({ type: "datetime-local" });

@@ -494,6 +494,23 @@ CREATE TABLE IF NOT EXISTS connector_audit (
 );
 CREATE INDEX IF NOT EXISTS idx_connector_audit_connector ON connector_audit(connector, id DESC);
 
+-- ───────────────────────── invite-link audit ──────────────────────────────
+-- One row per *generation* of an opaque invite link. The full ciphertext is a
+-- bearer token: anyone holding it can join, so this table deliberately has no
+-- column for it and no column for the raw relay URI. `code_prefix` is the
+-- first ten Base64URL characters (a correlation handle, not a credential) and
+-- `created_at_ms` is the generation time. The link itself is cached in
+-- `settings` under the subject it was minted for.
+CREATE TABLE IF NOT EXISTS invite_link_audit (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at_ms       INTEGER NOT NULL,
+    kind                TEXT NOT NULL CHECK (kind IN ('service_account','channel')),
+    subject_id          TEXT NOT NULL,
+    code_prefix         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_invite_link_audit_subject
+    ON invite_link_audit(kind, subject_id, id DESC);
+
 -- ───────────────────────── workflow webhook bridge ──────────────────────
 -- A subscription is an operator-created destination. `secret` is the HMAC key
 -- the receiver verifies; it is never returned by a GET. `scopes` is a JSON array
