@@ -28,6 +28,13 @@ gateway. The card's callback payload is a single token (the iOS client refuses
 whitespace and ``::`` in a payload), and only the card's own recipient can decide
 it.
 
+A trigger does not need a live node. With the link down the gateway still
+authenticates, checks the scope and the plugin/billing gate, persists the text in
+``outbox`` or the approval in ``workflow_approvals``, and answers 202 with
+``status: queued_local`` (text) or ``pending_approval`` (approval) plus
+``delivery_mode: standalone_gateway``. Only a frame that was neither sent nor
+queued is a 502.
+
 Privacy
 -------
 The audit row contains no text, URL, token or secret. The delivery queue has to
@@ -64,7 +71,7 @@ from app.connectors import (
     text_or_empty,
 )
 from app.crypto_service import EcoError, build_action, build_card
-from app.plugins import PluginDeps, PluginUnavailable
+from app.plugins import PluginDeps
 
 if TYPE_CHECKING:  # type-only
     from fastapi import APIRouter, Request
@@ -77,6 +84,7 @@ __all__ = [
     "INBOUND_SCOPES",
     "DEFAULT_SUBSCRIPTION_SCOPES",
     "token_refusal",
+    "trigger_delivery",
     "plan_trigger",
     "subscription_accepts",
     "build_signature_headers",
@@ -118,6 +126,9 @@ MAX_SUBSCRIPTIONS = 20
 MAX_TOKENS = 50
 MAX_TEXT_CHARS = 4000
 MAX_URL_CHARS = 2048
+
+DELIVERY_MODE_NODE = "popopx_node"
+DELIVERY_MODE_STANDALONE = "standalone_gateway"
 FETCH_LIMIT = 10
 DELIVERY_RETENTION_MS = 30 * 24 * 3600 * 1000
 TRIGGER_RETENTION_MS = 7 * 24 * 3600 * 1000
@@ -181,6 +192,27 @@ def token_refusal(row: Mapping[str, Any], now_ms: int, required_scope: str) -> s
     if required_scope not in _scopes_from_text(row.get("scopes")):
         return "scope_forbidden"
     return ""
+
+
+def trigger_delivery(mode: str, delivered: bool, queued: bool) -> Tuple[str, str, int]:
+    """Map one delivery outcome to ``(status, delivery_mode, http_status)``.
+
+    A standalone gateway has no POPOPX node to hand a frame to, but it still
+    authenticated the token, checked the scope, charged, persisted the approval
+    or outbox row and can retry later. Treating that as ``502`` would make an
+    offline integration look broken, so the queue is its own explicit state.
+    """
+    if mode == "approval":
+        if delivered:
+            return "pending_approval", DELIVERY_MODE_NODE, 200
+        if queued:
+            return "pending_approval", DELIVERY_MODE_STANDALONE, 202
+        return "failed", "", 502
+    if delivered:
+        return "delivered", DELIVERY_MODE_NODE, 200
+    if queued:
+        return "queued_local", DELIVERY_MODE_STANDALONE, 202
+    return "failed", "", 502
 
 
 def plan_trigger(body: Mapping[str, Any]) -> Dict[str, Any]:
@@ -472,16 +504,21 @@ async def _send_approval(deps: PluginDeps, planned: Mapping[str, Any], token_row
             "expires_at_ms": expires_at_ms,
         },
     )
+    state, delivery_mode, http_status = trigger_delivery(
+        "approval", bool(delivery.sent), bool(delivery.queued)
+    )
     return {
         "ok": True,
         "mode": "approval",
+        "status": state,
+        "delivery_mode": delivery_mode,
         "approval_id": approval_id,
         "card_id": card_id,
         "expires_at_ms": expires_at_ms,
         "delivered": bool(delivery.sent),
         "queued": bool(delivery.queued),
         "charged": int(delivery.charged or 0),
-    }, 200
+    }, http_status
 
 
 async def handle_inbound(deps: PluginDeps, message: "InboundMessage") -> bool:
@@ -637,13 +674,12 @@ async def handle_trigger(deps: PluginDeps, request: "Request") -> Any:
                          source="token:%s" % token_row["id"], scope=required, outcome="idempotent_replay",
                          status_code=int(replay["status_code"]), latency_ms=_now_ms() - started)
             return respond(int(replay["status_code"]), cached)
-    try:
-        deps.require()
-    except PluginUnavailable as exc:
+    decision = deps.gate.status(PLUGIN_ID, node_required=False)
+    if not decision.usable:
         record_audit(deps.db, connector="workflow", direction="inbound", action="trigger",
-                     source="token:%s" % token_row["id"], scope=required, outcome=exc.decision.reason,
-                     status_code=exc.http_status, latency_ms=_now_ms() - started)
-        return respond(exc.http_status, exc.decision.as_body())
+                     source="token:%s" % token_row["id"], scope=required, outcome=decision.reason,
+                     status_code=decision.http_status, latency_ms=_now_ms() - started)
+        return respond(decision.http_status, decision.as_body())
     deps.db.execute("UPDATE workflow_tokens SET last_used_at_ms = ? WHERE id = ?", (_now_ms(), str(token_row["id"])))
     try:
         if planned["mode"] == "text":
@@ -652,8 +688,11 @@ async def handle_trigger(deps: PluginDeps, request: "Request") -> Any:
                 ref="workflow:trigger",
                 idempotency_key=("workflow_trigger:" + request_key) if request_key else None,
             )
-            delivered = await deps.eco.send_frame(int(planned["contact_id"]), str(planned["text"]))
-            if not delivered:
+            delivered, queued = await deps.eco.send_frame_outcome(
+                int(planned["contact_id"]), str(planned["text"])
+            )
+            state, delivery_mode, status = trigger_delivery("text", delivered, queued)
+            if state == "failed":
                 try:
                     if int(getattr(charge, "charged", 0) or 0) > 0:
                         deps.billing.refund(
@@ -668,11 +707,13 @@ async def handle_trigger(deps: PluginDeps, request: "Request") -> Any:
             result = {
                 "ok": True,
                 "mode": "text",
+                "status": state,
+                "delivery_mode": delivery_mode,
                 "contact_id": int(planned["contact_id"]),
-                "delivered": True,
+                "delivered": delivered,
+                "queued": queued,
                 "charged": int(charge.charged),
             }
-            status = 200
         else:
             charge = deps.charge(
                 contact_id=int(planned["contact_id"]),
@@ -701,9 +742,12 @@ async def handle_trigger(deps: PluginDeps, request: "Request") -> Any:
                 " VALUES (?,?,?,?,?)",
                 (request_key, str(token_row["id"]), _json_body(result), status, _now_ms()),
             )
+        audit_outcome = str(result.get("status") or "")
+        if planned["mode"] == "approval":
+            audit_outcome = "approval_created" if result.get("delivered") else "approval_queued"
         record_audit(deps.db, connector="workflow", direction="inbound", action="trigger",
                      source="token:%s" % token_row["id"], scope=required,
-                     outcome=("approval_created" if planned["mode"] == "approval" else "delivered"),
+                     outcome=audit_outcome,
                      status_code=status, latency_ms=_now_ms() - started)
         return respond(status, result)
     except ConnectorError as exc:
@@ -1222,6 +1266,19 @@ def self_test() -> List[str]:
     check("a_token_with_no_expiry_is_long_lived",
           token_refusal({**good, "expires_at_ms": None}, now, "message.send") == "")
     check("an_unknown_token_is_refused", token_refusal(None, now, "message.send") == "token_unknown")
+
+    # ── standalone gateways report a queue, not a failure ──────────────────
+    check("a_delivered_text_trigger_names_the_node",
+          trigger_delivery("text", True, False) == ("delivered", DELIVERY_MODE_NODE, 200))
+    check("a_queued_text_trigger_is_standalone_not_an_error",
+          trigger_delivery("text", False, True) == ("queued_local", DELIVERY_MODE_STANDALONE, 202))
+    check("a_delivered_approval_is_pending_on_the_node",
+          trigger_delivery("approval", True, False) == ("pending_approval", DELIVERY_MODE_NODE, 200))
+    check("a_queued_approval_is_pending_in_a_standalone_gateway",
+          trigger_delivery("approval", False, True) == ("pending_approval", DELIVERY_MODE_STANDALONE, 202))
+    check("a_frame_nobody_accepted_is_still_a_failure",
+          trigger_delivery("text", False, False) == ("failed", "", 502)
+          and trigger_delivery("approval", False, False) == ("failed", "", 502))
 
     # ── the approval rule cannot be talked out of ──────────────────────────
     plain = plan_trigger({"contact_id": 7, "kind": "text", "text": "hello"})

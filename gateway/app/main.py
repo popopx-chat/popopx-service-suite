@@ -1301,6 +1301,26 @@ class EcoService:
     def bridge_connected(self) -> bool:
         return bool(getattr(self.bridge, "connected", False))
 
+    async def send_frame_outcome(self, contact_id: int, text: str) -> Tuple[bool, bool]:
+        """Send uncharged, or queue locally; return ``(delivered, queued)``.
+
+        The plugin seam needs to tell an operator whether a standalone gateway
+        accepted a message into its outbox or actually reached the node. A bare
+        bool conflates those two outcomes and makes an offline demo look like a
+        delivery failure.
+        """
+        if not text:
+            return False, False
+        if not self.bridge_connected():
+            self.enqueue(int(contact_id), FRAME_TEXT, text)
+            return False, True
+        try:
+            await self.bridge.send_text(int(contact_id), text)
+        except (NodeError, OSError, asyncio.TimeoutError) as exc:
+            LOG.warning("plain send to contact %d failed: %s", contact_id, exc)
+            return False, False
+        return True, False
+
     async def send_frame(self, contact_id: int, text: str) -> bool:
         """Send an already-encoded frame, or plain text, uncharged.
 
@@ -1314,17 +1334,8 @@ class EcoService:
         AI plugin matters: unsanitised prose starting with the marker *is* a frame
         as far as the phone is concerned.
         """
-        if not text:
-            return False
-        if not self.bridge_connected():
-            self.enqueue(int(contact_id), FRAME_TEXT, text)
-            return False
-        try:
-            await self.bridge.send_text(int(contact_id), text)
-        except (NodeError, OSError, asyncio.TimeoutError) as exc:
-            LOG.warning("plain send to contact %d failed: %s", contact_id, exc)
-            return False
-        return True
+        delivered, _queued = await self.send_frame_outcome(contact_id, text)
+        return delivered
 
     def enqueue(
         self,
@@ -2799,9 +2810,9 @@ class Gateway:
         self._tasks.append(asyncio.ensure_future(self._expiry_loop()))
         for mounted in self.plugins.values():
             if mounted.available and hasattr(mounted.module, "poll_loop"):
-                # Only the web3 bridge declares a `poll_loop`, and the name-based
-                # hook is what keeps this file from importing a plugin's internals:
-                # a plugin that needs no poller is not obliged to have one.
+                # The web3 bridge and the workflow webhook declare a `poll_loop`, and the
+                # name-based hook is what keeps this file from importing a plugin's
+                # internals: a plugin that needs no poller is not obliged to have one.
                 self._tasks.append(asyncio.ensure_future(mounted.module.poll_loop(mounted.deps, self.stop_event)))
 
     async def async_boot(self) -> None:

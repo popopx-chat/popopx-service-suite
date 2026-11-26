@@ -57,7 +57,7 @@ popopx-service-suite/
   没有「降级 HTTP 路径」这回事：`create_app()` 直接抛 `RuntimeError: FastAPI is not installed;
   run ./start_macos.sh, ./install_macos.sh or ./install_ubuntu22.sh first`（后面拼 `ImportError` 原文，见
   `gateway/app/main.py:3109`）。这种机器能做的是跑 18 组自检里的 16 组——运行器会把依赖那两个
-  wheel 的组点名 `SKIPPED`。下面「自检」里的 **2489 条 / 16 组** 就是这么来的，它不是一台正在
+  wheel 的组点名 `SKIPPED`。下面「自检」里的 **2497 条 / 16 组** 就是这么来的，它不是一台正在
   应答的网关。
 - 需要一个正在运行的 `popopx-agent` / `popopx-chat` 节点，它的 WebSocket 控制口在
   `127.0.0.1:5225`。没有节点也能起服务，见下面「启动行为与插件开关」。
@@ -150,7 +150,7 @@ Crashed=true}`、`RestartSec=3`→`ThrottleInterval=3`（那是最短间隔的�
 本机离线实测到的：`--help`、`--check`、`--dry-run`（含 `--with-node`）全部退出 0，两个 plist
 `plutil -lint` 通过，dry-run 里"已存在的 env 逐字节不变、只多一个 `.bak.<utc>`"这条由 cksum 现场
 证明；`brew` 装的 Python 3.11.18 过了版本门，用它按 `gateway/requirements.txt` 实装依赖建一个 venv，
-`--self-test` 实测 **2523 条 / 18 组、exit 0**（这一跑顺手揪出一个只在新版 starlette 上失明的 HTTP
+`--self-test` 实测 **2531 条 / 18 组、exit 0**（这一跑顺手揪出一个只在新版 starlette 上失明的 HTTP
 量具，见「自检」）。
 
 带 sudo 的真装真起 **2026-11-22 在这台 Mac 上跑过了**：`/Library/LaunchDaemons/com.popopx.gateway.plist`
@@ -254,6 +254,13 @@ NEXT STEPS：把 `POPOPX_PUBLIC_BASE_URL` 设成手机真正加载的那个 http
   可一键撤销、按 `message.send` / `approval.request` 分 scope。请求里只要带 `action`
   （或 `approval.action`），无论 `kind` 写什么都会强制变成人工确认卡片，审批通过后
   才把动作作为 `approval.decided` 事件发回订阅方。
+- 独立网关语义：节点未连接（`node_connected:false`）时，入站触发不会 502。它仍会完成
+  令牌鉴权、scope 校验、插件与计费策略评估，再把文本写入本地 `outbox`（审批则写
+  `workflow_approvals` 与卡片帧），返回 HTTP 202、`status:"queued_local"`（文本）或
+  `status:"pending_approval"`（审批）、`delivery_mode:"standalone_gateway"`、`queued:true`。
+  节点在线且已投递时返回 HTTP 200、`delivery_mode:"popopx_node"` 与 `status:"delivered"` /
+  `"pending_approval"`；只有既没发送也没排队时才回 502 并退款。独立部署与离线联调因此有
+  明确状态，不会把“已排队”误报成“投递失败”。
 - 脱敏审计：进出站、订阅/令牌操作都写 `connector_audit`，只有时间、方向、动作、
   来源、scope、状态码、结果与耗时，不存 URL、正文或密钥。
 
@@ -383,15 +390,15 @@ token 盖住的_admin 路由就不该开始监听），完整套件是开发/发
 `start_macos.sh`、`install_macos.sh` 与 `install_ubuntu22.sh` 在最后一步打印出来供复制。
 
 权威计数是这条命令自己打出来的最后一行。本机 2026-11-26 用 `/usr/bin/python3` 跑只有标准库那一档
-（`cryptography` 和 `fastapi` 都没装），实测是 **2489 条 / 16 组**：`app.crypto_service.crypto_self_test`（缺 `cryptography`）和
+（`cryptography` 和 `fastapi` 都没装），实测是 **2497 条 / 16 组**：`app.crypto_service.crypto_self_test`（缺 `cryptography`）和
 `app.main.http_self_test`（缺 `fastapi`）两组被运行器点名 `SKIPPED`，并打印 "those paths are NOT
 verified here"——这两组在本机一条都没跑过，不是"跑过了没记上"。同一台机器上换一个装了
-`gateway/requirements.txt` 的 venv 再跑，实测 **2523 条 / 18 组**，多出来的正是那两组：运行器逐组打印
+`gateway/requirements.txt` 的 venv 再跑，实测 **2531 条 / 18 组**，多出来的正是那两组：运行器逐组打印
 `crypto_self_test 6 checks` 与 `http_self_test 28 checks`，18 组之和恰好等于总行
-（2489 + 6 + 28 = 2523），所以你机器上那一行也能这样拆开对账。上面每一档都在 2026-11-26 重测过：
+（2497 + 6 + 28 = 2531），所以你机器上那一行也能这样拆开对账。上面每一档都在 2026-11-26 重测过：
 仓库 `.venv` 的 3.9.6（fastapi 0.128.8）与 `brew` 装的 3.11.18 各建一个 venv，两边同为
-**2523 条 / 18 组、exit 0**。新增的四组是 `app.connectors`（34）、`workflow_webhook_plugin`
-（52）、`carddav_connector`（43）、`caldav_connector`（48）；它们把 HMAC/SSRF、令牌过期与
+**2531 条 / 18 组、exit 0**。新增的四组是 `app.connectors`（34）、`workflow_webhook_plugin`
+（57）、`carddav_connector`（43）、`caldav_connector`（48）；它们把 HMAC/SSRF、令牌过期与
 撤销、vCard 敏感字段剥离、CalDAV 标题零泄漏都放进了可执行断言。后一次不是重复劳动：`requirements.txt`
 钉的是区间，新 venv 因此拿到 fastapi 0.165.0 + starlette 1.10.0，而 starlette 1.x 的
 `include_router` 不再把插件路由摊平进 `app.routes`（改成挂一个嵌套的 `_IncludedRouter`），HTTP 组
@@ -414,7 +421,7 @@ verified here"——这两组在本机一条都没跑过，不是"跑过了没�
 # 同样从仓库根目录（跑过上一块就先 cd ..）
 python3.11 -m venv .venv                      # 3.11 是这套件的目标解释器，见 requirements.txt 头几行
 .venv/bin/pip install -r gateway/requirements.txt
-cd gateway && ../.venv/bin/python -m app.main --self-test   # 18 组全绿、无 SKIPPED（本机实测 2523 条）
+cd gateway && ../.venv/bin/python -m app.main --self-test   # 18 组全绿、无 SKIPPED（本机实测 2531 条）
 ```
 
 ## 跨实现密码学校验

@@ -245,7 +245,15 @@ class PluginGate:
         self._billing = billing
         self._node_up = node_up
 
-    def status(self, plugin_id: str) -> GateDecision:
+    def status(self, plugin_id: str, *, node_required: bool = True) -> GateDecision:
+        """The gate's truth table, optionally waiving the live-node requirement.
+
+        ``node_required=False`` exists for an ingress that has an explicit durable
+        local queue: the workflow trigger can authenticate, charge and persist an
+        approval or outbox row while the node is down, so a standalone gateway is
+        not indistinguishable from a broken one. Toggle and billing checks still
+        apply; only the retryable node-down branch is skipped.
+        """
         spec = plugin_for_id(plugin_id)
         if not getattr(self._config.plugins, spec.toggle, False):
             return GateDecision(
@@ -255,7 +263,7 @@ class PluginGate:
                 http_status=404,
                 detail="plugin %s is switched off (set POPOPX_PLUGIN_%s=1)" % (plugin_id, spec.toggle.upper()),
             )
-        if not self._node_up():
+        if node_required and not self._node_up():
             return GateDecision(
                 plugin_id=plugin_id,
                 usable=False,
@@ -394,6 +402,10 @@ class Eco(Protocol):
 
     async def send_frame(self, contact_id: int, text: str) -> bool:
         """Send an already-encoded frame. Returns whether the node accepted it."""
+        ...
+
+    async def send_frame_outcome(self, contact_id: int, text: str) -> Tuple[bool, bool]:
+        """Send uncharged, or queue locally; return ``(delivered, queued)``."""
         ...
 
     async def push_menu(self) -> bool:
@@ -543,6 +555,19 @@ def self_test() -> list:
     decision = gate(True, False, node_up=False).status("ai_agent")
     check("node_down_is_503", (not decision.usable) and decision.http_status == 503)
     check("node_down_reason", decision.reason == REASON_NODE_DOWN)
+
+    # An ingress with a durable local queue may waive only the node check.
+    decision = gate(True, False, node_up=False).status("workflow_webhook", node_required=False)
+    check("a_queueable_plugin_is_usable_while_the_node_is_down",
+          decision.usable and decision.http_status == 200)
+    decision = gate(True, True, node_up=False).status("workflow_webhook", node_required=False)
+    check("waiving_the_node_does_not_waive_billing",
+          (not decision.usable) and decision.reason == REASON_FUSED
+          and decision.http_status == 402)
+    decision = gate(False, False, node_up=False).status("workflow_webhook", node_required=False)
+    check("waiving_the_node_does_not_waive_the_toggle",
+          (not decision.usable) and decision.reason == REASON_DISABLED
+          and decision.http_status == 404)
 
     # The toggle is consulted by attribute name from the mount table, so a rename in
     # config.PluginToggles fails loudly at the gate instead of reading None.

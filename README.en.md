@@ -65,7 +65,7 @@ popopx-service-suite/
   the `ImportError`
   text appended (`gateway/app/main.py:3109`). What a standard-library-only machine *can* do is
   run 16 of the 18 self-test groups, because the runner names the two that import those wheels
-  as `SKIPPED` — that is what the **2489 checks across 16 groups** figure below is, and it is
+  as `SKIPPED` — that is what the **2497 checks across 16 groups** figure below is, and it is
   not a gateway answering requests.
 - A running `popopx-agent` / `popopx-chat` node exposing its WebSocket control API on
   `127.0.0.1:5225`.
@@ -185,7 +185,7 @@ Measured offline on this machine: `--help`, `--check` and `--dry-run` (including
 all exit 0, both plists pass `plutil -lint`, and the dry-run proves with `cksum` that a
 pre-existing env file survives byte-identical with one `.bak.<utc>` added. `brew`'s Python 3.11.18
 passes the interpreter gate, and a venv built from it with `gateway/requirements.txt` actually
-installed measures **2523 checks across 18 groups, exit 0** on `--self-test` (that run also caught
+installed measures **2531 checks across 18 groups, exit 0** on `--self-test` (that run also caught
 an HTTP instrument that goes blind only on the newer starlette — see **Self-test** below).
 
 The sudo install that really starts the service **was run on this Mac on 2026-11-22**:
@@ -314,6 +314,16 @@ All three connectors ship disabled and need configuration first; the console's
   `action` (or `approval.action`) is forced into a human-confirmation card regardless of
   `kind`; the action is only emitted back to subscribers as an `approval.decided` event after
   a person approves.
+- Standalone semantics: with no node connected (`node_connected:false`) an inbound trigger no
+  longer answers 502. It still authenticates the token, checks the scope, evaluates the
+  plugin/billing gate, writes the text to the local `outbox` (or the approval card frame plus
+  the `workflow_approvals` row), and answers HTTP 202 with `status:"queued_local"` (text) or
+  `status:"pending_approval"` (approval), `delivery_mode:"standalone_gateway"` and
+  `queued:true`. A connected node that accepted the frame yields HTTP 200,
+  `delivery_mode:"popopx_node"` and `status:"delivered"` / `"pending_approval"`; only when
+  neither sent nor queued does the gateway answer 502 and refund. Offline integration and
+  standalone deployments therefore get an explicit state instead of a queue success reported
+  as a delivery failure.
 - Redacted audit: inbound/outbound calls and subscription/token operations write
   `connector_audit` rows containing time, direction, action, source, scope, status code,
   outcome and latency — never the URL, body or key.
@@ -464,17 +474,17 @@ copying as the last step by `start_macos.sh`, `install_macos.sh` and `install_ub
 
 The authoritative count is the last line that command prints. On this machine on 2026-11-26
 `/usr/bin/python3` has only the standard library (no `cryptography`, no `fastapi`), and the
-measured result was **2489 checks across 16 groups**: `app.crypto_service.crypto_self_test` (needs
+measured result was **2497 checks across 16 groups**: `app.crypto_service.crypto_self_test` (needs
 `cryptography`) and `app.main.http_self_test` (needs `fastapi`) were named as `SKIPPED` by the
 runner, which prints "those paths are NOT verified here" — those two groups ran zero checks
 here, which is not the same as having run and not been counted. Re-running on the same machine
-inside a venv that has `gateway/requirements.txt` installed measured **2523 checks across 18
+inside a venv that has `gateway/requirements.txt` installed measured **2531 checks across 18
 groups**, and the difference is exactly those two groups: the runner prints
 `crypto_self_test 6 checks` and `http_self_test 28 checks` per group, and the 18 group figures
-sum to the total line (2489 + 6 + 28 = 2523), so you can audit your own run the same way. Every
+sum to the total line (2497 + 6 + 28 = 2531), so you can audit your own run the same way. Every
 figure above was re-measured on 2026-11-26: the repository `.venv`'s 3.9.6 (fastapi 0.128.8) and a
-fresh venv built from `brew`'s Python 3.11.18 both measure **2523 checks across 18 groups, exit 0**.
-The four new groups are `app.connectors` (34), `workflow_webhook_plugin` (52),
+fresh venv built from `brew`'s Python 3.11.18 both measure **2531 checks across 18 groups, exit 0**.
+The four new groups are `app.connectors` (34), `workflow_webhook_plugin` (57),
 `carddav_connector` (43) and `caldav_connector` (48); HMAC/SSRF refusal, token expiry and
 revocation, vCard stripping and zero CalDAV title leakage are executable assertions.
 The second one was not a formality: `requirements.txt` pins ranges, so the new venv resolved
@@ -508,7 +518,7 @@ tell a mounted route from a route that merely exists in source.
 # Still from the repository root (cd .. if the block above left you in gateway/)
 python3.11 -m venv .venv                      # 3.11 is the suite's target interpreter
 .venv/bin/pip install -r gateway/requirements.txt
-cd gateway && ../.venv/bin/python -m app.main --self-test   # 18 groups green, no SKIPPED (2523 here)
+cd gateway && ../.venv/bin/python -m app.main --self-test   # 18 groups green, no SKIPPED (2531 here)
 ```
 
 ## Cross-implementation crypto check
