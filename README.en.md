@@ -709,6 +709,35 @@ cd gateway && ../.venv/bin/python -m app.main --self-test   # 29 groups green, n
 ../.venv/bin/python -m pytest                                # 51 passed: 29 adapter + 22 dedicated cases
 ```
 
+### Remote CI (GitHub Actions)
+
+`.github/workflows/ci.yml` moves the gates above into the cloud. It runs on push / PR to
+`main` and on `workflow_dispatch`; a newer push to the same ref cancels the older run. Three
+jobs:
+
+- `self-test` matrix on Python 3.9 and 3.11: installs `gateway/requirements-dev.txt`, then
+  requires the self-test line `2932 checks passed across 29 groups` with no
+  `group(s) skipped`, and pytest `51 passed`.
+- `wheel-less`: on 3.11, creates an empty venv with `python -m venv --without-pip`, first
+  asserts that `fastapi` and `cryptography` both fail to import, then requires
+  `2778 checks passed across 26 groups` with exactly 3 named SKIPPED groups
+  (`crypto_self_test`, `opaque_invite_self_test`, `http_self_test`).
+- **`CI Gate`**: the fixed-name aggregate job (`needs: [self-test, wheel-less]`,
+  `if: always()`), parses `toJSON(needs)` and requires every mandatory job to be exactly
+  `success`, then downloads each leg's result artifact and re-checks the counts. A skipped
+  matrix leg, a missing artifact or a drifted count turns it red instead of false-green.
+
+Every job pins `runs-on: ubuntu-24.04` rather than `ubuntu-latest`: measured on 2026-11-28,
+`ubuntu-latest` resolved to Ubuntu 26.04, and `actions/python-versions` has no CPython 3.9 x64
+build for 26.04, so the 3.9 leg dies in setup-python (that is what the first run `46149466859`
+did; 3.11 and wheel-less passed and `CI Gate` correctly went red). The `ubuntu-24.04` manifest
+provides both 3.9.25 and 3.11.18; after the fix, run `46149623216` has all four jobs green.
+
+Those three counts are **gates**, not descriptions: when the suite gains or loses assertions,
+update the expected strings in ci.yml in the same commit — never loosen them to turn a red run
+green. CI does not replace the local measurement; it re-runs the same numbers on a clean
+machine.
+
 ## Cross-implementation crypto check
 
 `crypto_self_test()` is a same-language round trip: it proves the module is self-consistent,

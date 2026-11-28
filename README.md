@@ -579,6 +579,30 @@ cd gateway && ../.venv/bin/python -m app.main --self-test   # 29 组全绿、无
 ../.venv/bin/python -m pytest                                # 51 passed：29 条适配器 + 22 条专用断言
 ```
 
+### 远端 CI（GitHub Actions）
+
+`.github/workflows/ci.yml` 把上面这套门禁搬到云端，触发条件是 push / PR 到 `main` 以及手动
+`workflow_dispatch`；同一 ref 的新推送会取消旧运行。三个 job：
+
+- `self-test` 矩阵 Python 3.9 与 3.11：装 `gateway/requirements-dev.txt`，然后要求自检输出
+  `2932 checks passed across 29 groups` 且没有任何 `group(s) skipped`，pytest 要求 `51 passed`。
+- `wheel-less`：3.11 下用 `python -m venv --without-pip` 建一个空 venv，先断言
+  `fastapi` / `cryptography` 都导入失败，再要求自检 `2778 checks passed across 26 groups`
+  且恰好 3 个具名 SKIPPED（`crypto_self_test`、`opaque_invite_self_test`、`http_self_test`）。
+- **`CI Gate`**：固定名称的聚合 job，`needs: [self-test, wheel-less]` 且 `if: always()`，
+  解析 `toJSON(needs)` 要求每个必选 job 的结果恰好是 `success`，再下载每条腿上传的结果
+  artifact 复核计数——矩阵腿被跳过、artifact 缺失或计数漂移都会让它变红，而不是被跳过误绿。
+
+所有 job 固定 `runs-on: ubuntu-24.04`，不用 `ubuntu-latest`：2026-11-28 实测 `ubuntu-latest`
+解析到 Ubuntu 26.04，而 `actions/python-versions` 没有 26.04 的 CPython 3.9 x64 预编译包，
+3.9 腿会在 setup-python 阶段直接失败（第一次运行 `46149466859` 就是这样；3.11 与 wheel-less
+通过，`CI Gate` 正确变红）。`ubuntu-24.04` 的 manifest 同时提供 3.9.25 与 3.11.18，修复后的
+运行 `46149623216` 四个 job 全绿。
+
+这三个计数是**门禁**，不是描述：套件新增或删除断言时，必须在同一个提交里更新 ci.yml 的
+期望字符串；不要为了把红跑改绿而放宽它们。CI 不替代本机测量，它只是把同一组数字放到干净
+机器上再验一遍。
+
 ## 跨实现密码学校验
 
 `crypto_self_test()` 是同语言往返，它能证明本模块自洽，证不了手机读得懂这些字节。
