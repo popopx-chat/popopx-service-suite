@@ -17,9 +17,13 @@ concurrency:
 jobs:
   # The counts below are deliberate gates: update them only together with a
   # measured change in the suite, never to make a red run green.
+  #
+  # Every job pins ubuntu-24.04 instead of ubuntu-latest: on 2026-11-28 the
+  # latest image was 26.04, which has no CPython 3.9 build in
+  # actions/python-versions, so the 3.9 leg died in setup-python.
   self-test:
     name: self-test (Python ${{ matrix.python }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -73,7 +77,7 @@ jobs:
 
   wheel-less:
     name: wheel-less compatibility (stdlib only)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -120,7 +124,7 @@ jobs:
 
   ci-gate:
     name: CI Gate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [self-test, wheel-less]
     if: always()
     steps:
