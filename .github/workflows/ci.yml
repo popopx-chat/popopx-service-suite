@@ -1,0 +1,171 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The counts below are deliberate gates: update them only together with a
+  # measured change in the suite, never to make a red run green.
+  self-test:
+    name: self-test (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.11"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: gateway/requirements-dev.txt
+      - name: Install runtime and test dependencies
+        run: python -m pip install -r gateway/requirements-dev.txt
+      - name: Self-test (expect 2932 checks across 29 groups, no SKIPPED)
+        run: |
+          set -euo pipefail
+          cd gateway
+          python -m app.main --self-test | tee /tmp/selftest.txt
+          grep -qF 'self-test: 2932 checks passed across 29 groups' /tmp/selftest.txt || {
+            echo '::error::self-test count changed; expected 2932 checks across 29 groups'
+            exit 1
+          }
+          if grep -qF 'group(s) skipped' /tmp/selftest.txt; then
+            echo '::error::a wheeled interpreter reported SKIPPED groups'
+            exit 1
+          fi
+      - name: pytest (expect 51 passed)
+        run: |
+          set -euo pipefail
+          cd gateway
+          python -m pytest -q | tee /tmp/pytest.txt
+          grep -qE '^51 passed' /tmp/pytest.txt || {
+            echo '::error::pytest count changed; expected 51 passed'
+            exit 1
+          }
+      - name: Record this leg's result
+        if: always()
+        run: |
+          {
+            echo "python=${{ matrix.python }}"
+            echo "self_test=$(grep -F 'self-test:' /tmp/selftest.txt | tail -n 1 || true)"
+            echo "pytest=$(tail -n 1 /tmp/pytest.txt || true)"
+          } > "selftest-${{ matrix.python }}.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: selftest-${{ matrix.python }}
+          path: selftest-${{ matrix.python }}.txt
+          if-no-files-found: error
+
+  wheel-less:
+    name: wheel-less compatibility (stdlib only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Create a wheel-less venv and prove the wheels are absent
+        run: |
+          set -euo pipefail
+          python -m venv --without-pip /tmp/wheelless
+          if /tmp/wheelless/bin/python -c 'import fastapi' 2>/dev/null; then
+            echo '::error::fastapi is importable in the wheel-less venv'
+            exit 1
+          fi
+          if /tmp/wheelless/bin/python -c 'import cryptography' 2>/dev/null; then
+            echo '::error::cryptography is importable in the wheel-less venv'
+            exit 1
+          fi
+      - name: Self-test (expect 2778 checks across 26 groups, 3 named SKIPPED)
+        run: |
+          set -euo pipefail
+          cd gateway
+          /tmp/wheelless/bin/python -m app.main --self-test | tee /tmp/selftest-wheelless.txt
+          grep -qF 'self-test: 2778 checks passed across 26 groups' /tmp/selftest-wheelless.txt || {
+            echo '::error::wheel-less count changed; expected 2778 checks across 26 groups'
+            exit 1
+          }
+          grep -qF 'self-test: 3 group(s) skipped on this interpreter:' /tmp/selftest-wheelless.txt || {
+            echo '::error::expected exactly 3 named SKIPPED groups'
+            exit 1
+          }
+          for module in app.crypto_service.crypto_self_test app.opaque_invite_codec.opaque_invite_self_test app.main.http_self_test; do
+            grep -qF "$module" /tmp/selftest-wheelless.txt || {
+              echo "::error::the SKIPPED line does not name $module"
+              exit 1
+            }
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: selftest-wheelless
+          path: /tmp/selftest-wheelless.txt
+          if-no-files-found: error
+
+  ci-gate:
+    name: CI Gate
+    runs-on: ubuntu-latest
+    needs: [self-test, wheel-less]
+    if: always()
+    steps:
+      - name: Every mandatory job must be exactly "success"
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          needs = json.loads(os.environ["NEEDS"])
+          required = {"self-test", "wheel-less"}
+          if set(needs) != required:
+              sys.exit("needs set drifted: %r" % sorted(needs))
+          bad = {name: entry.get("result") for name, entry in needs.items()
+                 if entry.get("result") != "success"}
+          if bad:
+              sys.exit("mandatory jobs are not all success: %r" % bad)
+          print("mandatory jobs succeeded: %s" % ", ".join(sorted(required)))
+          PY
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: selftest-*
+          path: artifacts
+          merge-multiple: true
+      - name: Both interpreters and the wheel-less tier must have produced their counts
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          import sys
+
+          root = pathlib.Path("artifacts")
+          required = {
+              "selftest-3.9.txt": "self-test: 2932 checks passed across 29 groups",
+              "selftest-3.11.txt": "self-test: 2932 checks passed across 29 groups",
+              "selftest-wheelless.txt": "self-test: 2778 checks passed across 26 groups",
+          }
+          missing = sorted(name for name in required if not (root / name).is_file())
+          if missing:
+              sys.exit("missing artifacts (a matrix leg was skipped or failed): %r" % missing)
+          wrong = sorted(name for name, needle in required.items()
+                         if needle not in (root / name).read_text(errors="replace"))
+          if wrong:
+              sys.exit("artifact content does not carry the expected count: %r" % wrong)
+          print("artifacts verified for 3.9, 3.11 and the wheel-less tier")
+          PY
