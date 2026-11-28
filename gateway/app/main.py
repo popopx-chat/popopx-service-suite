@@ -162,6 +162,11 @@ from app.crypto_service import (
     epoch_secret_plaintext,
 )
 from app.database import Database
+from app.compute import authorizer as compute_authorizer
+from app.compute import registry as compute_registry
+from app.data_lifecycle import cleanup as lifecycle_cleanup
+from app.data_lifecycle import policy as lifecycle_policy
+from app.data_lifecycle import policy_engine as lifecycle_engine
 from app.vault import SecretBox, VaultError, vault_for
 from app.opaque_invite_codec import (
     LINK_PREFIX,
@@ -2918,6 +2923,12 @@ class Gateway:
         self.gate = PluginGate(config, self.billing, self.eco.bridge_connected)
         self.plugins: Dict[str, MountedPlugin] = {}
         self.router = InboundRouter(config, self.db, self.billing, self.eco, self.plugins)
+        # Zero-retention task bodies live here and nowhere else: a dict of
+        # bytearrays owned by this process, wiped on delivery *and* on every
+        # failure path. The temp area is only allocated when a task names an
+        # attachment, so a gateway whose callers never use one touches no disk.
+        self.data_lifecycle_broker = lifecycle_engine.ZeroRetentionBroker()
+        self.data_lifecycle_temp = lifecycle_cleanup.TempArea()
         # The bridge takes its callbacks as constructor arguments, and its handler
         # slots are private for exactly that reason; assigning them here is the one
         # place in the suite that reaches past the constructor, and it is what keeps
@@ -3457,6 +3468,15 @@ def create_app(config: Optional[Config] = None, *, gateway: Optional[Gateway] = 
         if not isinstance(parsed, dict):
             raise bad_request("body_must_be_object", "expected a JSON object, got %s" % type(parsed).__name__)
         return parsed
+
+    def request_principal(request: Request) -> str:
+        """Who is acting: the token's label (root is labelled ``root``).
+
+        Only the label, never the token: the label is what an operator minted it
+        with, and a secret has no business in an audit row or a log line.
+        """
+        grant = admin_auth.grant_from_request(request) or {}
+        return str(grant.get("label") or grant.get("token_id") or "root")
 
     def admin_required(request: Request, *, root_only: bool = False) -> None:
         """Refuse unless the request carries a credential that covers this route.
@@ -4554,6 +4574,92 @@ def create_app(config: Optional[Config] = None, *, gateway: Optional[Gateway] = 
             gw.db.execute("UPDATE service_identity SET auto_accept = ?, updated_at_ms = ? WHERE id = 1",
                           (1 if value else 0, now_ms()))
         return {"ok": True, "key": key, "value": gw.db.get_setting(key)}
+
+    # ── data lifecycle and compute ──────────────────────────────────────────
+
+    @app.get("/api/v1/data-lifecycle/policies")
+    async def data_lifecycle_policies(request: Request) -> Dict[str, Any]:
+        """The three built-in retention modes plus any operator policies.
+
+        Built-ins are virtual constants, so this endpoint never writes a row just
+        because somebody looked.
+        """
+        admin_required(request)
+        return {"ok": True, "policies": lifecycle_policy.list_policies(gw.db),
+                "modes": list(lifecycle_policy.MODES)}
+
+    @app.put("/api/v1/data-lifecycle/policies/{policy_id}")
+    async def data_lifecycle_policy_put(policy_id: str, request: Request) -> Dict[str, Any]:
+        admin_required(request)
+        body = await json_body(request)
+        body["policy_id"] = policy_id
+        try:
+            stored = lifecycle_policy.upsert_policy(gw.db, policy_id, body)
+        except ValueError as exc:
+            raise bad_request("policy_invalid", str(exc)) from exc
+        return {"ok": True, "policy": stored}
+
+    @app.post("/api/v1/data-lifecycle/erase")
+    async def data_lifecycle_erase(request: Request) -> Dict[str, Any]:
+        """Erase one task, one workspace, or everything already expired."""
+        admin_required(request)
+        body = await json_body(request)
+        try:
+            result = lifecycle_cleanup.erase_request(
+                gw.db,
+                gw.data_lifecycle_broker,
+                body,
+                principal=request_principal(request),
+                temp_area=gw.data_lifecycle_temp,
+            )
+        except ValueError as exc:
+            raise bad_request("erase_invalid", str(exc)) from exc
+        return {"ok": True, "result": result}
+
+    @app.post("/api/v1/compute/allocate")
+    async def compute_allocate(request: Request) -> Dict[str, Any]:
+        """Default deny: a policy, a healthy node, a granted capability and the
+        user's explicit approval, or no allocation. Every refusal is audited."""
+        admin_required(request)
+        body = await json_body(request)
+        decision = compute_authorizer.authorize_allocation(
+            gw.db, body, principal=request_principal(request)
+        )
+        if not decision["allowed"]:
+            raise GatewayError(decision["status_code"], decision["reason"], decision["detail"])
+        return {"ok": True, "decision": decision}
+
+    @app.get("/api/v1/compute/nodes")
+    async def compute_nodes(request: Request) -> Dict[str, Any]:
+        admin_required(request)
+        return {"ok": True, "nodes": compute_registry.list_nodes(gw.db)}
+
+    @app.post("/api/v1/compute/nodes/{node_id}/heartbeat")
+    async def compute_node_heartbeat(node_id: str, request: Request) -> Dict[str, Any]:
+        """A heartbeat refreshes an existing node; it never registers one."""
+        admin_required(request)
+        body = await json_body(request)
+        try:
+            node = compute_registry.heartbeat(
+                gw.db, node_id, capabilities=body.get("capabilities")
+            )
+        except ValueError as exc:
+            raise bad_request("node_invalid", str(exc)) from exc
+        if node is None:
+            raise not_found("node_not_registered",
+                            "node %r is not registered with this gateway" % node_id)
+        return {"ok": True, "node": node}
+
+    @app.post("/api/v1/compute/workspaces/{workspace_id}/cleanup")
+    async def compute_workspace_cleanup(workspace_id: str, request: Request) -> Dict[str, Any]:
+        admin_required(request)
+        try:
+            result = compute_registry.cleanup_workspace(
+                gw.db, workspace_id, principal=request_principal(request)
+            )
+        except ValueError as exc:
+            raise bad_request("workspace_invalid", str(exc)) from exc
+        return {"ok": True, "result": result}
 
     # ── diagnostics ─────────────────────────────────────────────────────────
 
@@ -6529,6 +6635,107 @@ def http_self_test() -> List[str]:
               scoped_token not in audit_text and plugin_token not in audit_text
               and admin_auth.token_hash(scoped_token) not in audit_text)
 
+        # Data lifecycle: built-ins are virtual, a custom policy round-trips, and
+        # an erase takes ids only — the API has no way to name a payload.
+        policies = client.get("/api/v1/data-lifecycle/policies", headers=headers)
+        policy_rows = (policies.json() if policies.status_code == 200 else {}).get("policies") or []
+        check("the_three_builtin_policies_are_listed",
+              policies.status_code == 200
+              and [row["policy_id"] for row in policy_rows if row.get("builtin")]
+              == ["zero_retention", "ephemeral", "user_owned"])
+        check("listing_policies_wrote_no_rows",
+              gateway.db.scalar("SELECT COUNT(*) FROM data_lifecycle_policies") == 0)
+        custom = client.put("/api/v1/data-lifecycle/policies/scratch-24h",
+                            json={"mode": "ephemeral", "temporary_ttl_seconds": 86400}, headers=headers)
+        check("a_custom_policy_is_created_over_HTTP",
+              custom.status_code == 200
+              and custom.json()["policy"]["temporary_ttl_seconds"] == 86400)
+        bad_mode = client.put("/api/v1/data-lifecycle/policies/forever",
+                              json={"mode": "forever"}, headers=headers)
+        changed_builtin = client.put("/api/v1/data-lifecycle/policies/zero_retention",
+                                     json={"mode": "ephemeral", "temporary_ttl_seconds": 60}, headers=headers)
+        check("a_policy_with_an_unknown_mode_and_a_changed_builtin_are_both_refused",
+              bad_mode.status_code == 400 and changed_builtin.status_code == 400)
+
+        admit = lifecycle_engine.admit_task(
+            gateway.db, gateway.data_lifecycle_broker, task_id="http-ephemeral-1",
+            policy_id="ephemeral", state={"note": "gone"}, workspace_id="http-ws-erase",
+            now_ms=now_ms(),
+        )
+        erased = client.post("/api/v1/data-lifecycle/erase",
+                             json={"workspace_id": "http-ws-erase"}, headers=headers)
+        check("an_ephemeral_workspace_is_erased_over_HTTP",
+              admit["persisted"] is True and erased.status_code == 200
+              and erased.json()["result"]["tasks"] == 1
+              and gateway.db.scalar("SELECT COUNT(*) FROM data_lifecycle_tasks") == 0)
+        bad_erase = client.post("/api/v1/data-lifecycle/erase", json={}, headers=headers)
+        expired_erase = client.post("/api/v1/data-lifecycle/erase", json={"scope": "expired"}, headers=headers)
+        check("an_empty_erase_request_is_refused_and_an_expired_sweep_is_not",
+              bad_erase.status_code == 400 and expired_erase.status_code == 200)
+        lifecycle_minted = client.post(
+            "/api/v1/admin/tokens",
+            json={"label": "http self-test lifecycle reader", "scopes": ["core:data-lifecycle:ro"]},
+            headers=headers,
+        )
+        lifecycle_token = str(
+            (lifecycle_minted.json() if lifecycle_minted.status_code == 200 else {}).get("token") or ""
+        )
+        lifecycle_headers = {"x-admin-token": lifecycle_token}
+        check("the_hyphenated_lifecycle_scope_mints_and_reads",
+              lifecycle_minted.status_code == 200
+              and client.get("/api/v1/data-lifecycle/policies", headers=lifecycle_headers).status_code == 200)
+        check("a_lifecycle_read_scope_cannot_erase",
+              client.post("/api/v1/data-lifecycle/erase", json={"scope": "expired"},
+                          headers=lifecycle_headers).status_code == 403)
+
+        # Compute: default deny, then one heartbeat, one approval, one allocation.
+        denied_alloc = client.post(
+            "/api/v1/compute/allocate",
+            json={"workspace_id": "http-ws-compute", "node_id": "http-node",
+                  "policy_id": "zero_retention"},
+            headers=headers,
+        )
+        check("an_unregistered_compute_node_is_refused_over_HTTP",
+              denied_alloc.status_code == 404
+              and denied_alloc.json().get("error") == "node_not_registered")
+        compute_registry.register_node(
+            gateway.db, "http-node", "dedicated_worker",
+            capabilities={"gpu": True}, now_ms=now_ms(),
+        )
+        beat = client.post("/api/v1/compute/nodes/http-node/heartbeat", json={}, headers=headers)
+        check("a_registered_node_becomes_healthy_with_its_heartbeat",
+              beat.status_code == 200 and beat.json()["node"]["health"] == "healthy")
+        missing_approval = client.post(
+            "/api/v1/compute/allocate",
+            json={"workspace_id": "http-ws-compute", "node_id": "http-node",
+                  "policy_id": "zero_retention", "capabilities": ["gpu"]},
+            headers=headers,
+        )
+        check("allocation_without_user_approval_is_refused_over_HTTP",
+              missing_approval.status_code == 403
+              and missing_approval.json().get("error") == "approval_required")
+        allowed_alloc = client.post(
+            "/api/v1/compute/allocate",
+            json={"workspace_id": "http-ws-compute", "node_id": "http-node",
+                  "policy_id": "zero_retention", "capabilities": ["gpu"],
+                  "approval": {"approved": True, "approval_id": "http-approval-1"}},
+            headers=headers,
+        )
+        check("policy_capability_and_approval_together_allocate_over_HTTP",
+              allowed_alloc.status_code == 200
+              and allowed_alloc.json()["decision"]["allocation"]["allocation_id"].startswith("cal_"))
+        nodes_list = client.get("/api/v1/compute/nodes", headers=headers)
+        check("the_node_list_reports_the_live_allocation",
+              nodes_list.status_code == 200
+              and nodes_list.json()["nodes"][0]["active_allocations"] == 1)
+        cleaned_up = client.post("/api/v1/compute/workspaces/http-ws-compute/cleanup", headers=headers)
+        check("a_workspace_cleanup_releases_the_allocation_over_HTTP",
+              cleaned_up.status_code == 200
+              and cleaned_up.json()["result"]["allocations"] == 1
+              and compute_registry.allocation_count(gateway.db, "http-node") == 0)
+        unknown_beat = client.post("/api/v1/compute/nodes/nobody/heartbeat", json={}, headers=headers)
+        check("a_heartbeat_for_an_unknown_node_is_a_404", unknown_beat.status_code == 404)
+
         served = client.get("/")
         check("the_console_is_served_at_the_root",
               served.status_code == 200 and "text/html" in served.headers.get("content-type", ""))
@@ -6839,6 +7046,13 @@ SELF_TEST_MODULES: Tuple[str, ...] = (
     "app.database",
     "app.config",
     "app.admin_auth",
+    "app.data_lifecycle.policy",
+    "app.data_lifecycle.retention",
+    "app.data_lifecycle.audit",
+    "app.data_lifecycle.policy_engine",
+    "app.data_lifecycle.cleanup",
+    "app.compute.registry",
+    "app.compute.authorizer",
     "app.vault",
     "app.crypto_service",
     "app.billing_service",

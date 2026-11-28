@@ -677,6 +677,116 @@ CREATE TABLE IF NOT EXISTS slack_discord_audit (
     status_code         INTEGER,
     created_at_ms       INTEGER NOT NULL
 );
+
+-- ───────────────────────── Data lifecycle ───────────────────────────────
+-- Operator overrides of the three built-in retention modes. Built-ins are
+-- virtual constants in `app.data_lifecycle.policy`; a row here exists only when
+-- somebody changed a description/ttl, so reading the policy list never writes.
+CREATE TABLE IF NOT EXISTS data_lifecycle_policies (
+    policy_id           TEXT PRIMARY KEY,
+    mode                TEXT NOT NULL CHECK (mode IN ('zero_retention','ephemeral','user_owned')),
+    temporary_ttl_seconds INTEGER,
+    created_at_ms       INTEGER NOT NULL,
+    updated_at_ms       INTEGER NOT NULL
+);
+
+-- Task index for the two persistent modes. A zero_retention task never gets a
+-- row here — that absence is the guarantee, so the status column cannot even
+-- express "zero retention".
+CREATE TABLE IF NOT EXISTS data_lifecycle_tasks (
+    task_id             TEXT PRIMARY KEY,
+    policy_id           TEXT NOT NULL,
+    mode                TEXT NOT NULL CHECK (mode IN ('ephemeral','user_owned')),
+    workspace_id        TEXT,
+    principal           TEXT NOT NULL DEFAULT '',
+    tool                TEXT NOT NULL DEFAULT '',
+    status              TEXT NOT NULL DEFAULT 'admitted',
+    payload_bytes       INTEGER NOT NULL DEFAULT 0,
+    created_at_ms       INTEGER NOT NULL,
+    expires_at_ms       INTEGER,
+    erased_at_ms        INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS data_lifecycle_tasks_expiry
+    ON data_lifecycle_tasks (expires_at_ms);
+
+-- Short-lived state for ephemeral tasks: agent context and attachment pointers
+-- that the sweeper deletes. `state_json` is an opaque envelope; it is erased
+-- with the task row on expiry or on an explicit erase request.
+CREATE TABLE IF NOT EXISTS data_lifecycle_ephemeral (
+    task_id             TEXT PRIMARY KEY,
+    workspace_id        TEXT,
+    state_json          TEXT NOT NULL DEFAULT '',
+    attachment_path     TEXT,
+    created_at_ms       INTEGER NOT NULL,
+    expires_at_ms       INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS data_lifecycle_ephemeral_expiry
+    ON data_lifecycle_ephemeral (expires_at_ms);
+
+-- Metadata-only audit: task id, principal, tool, mode, action, status code,
+-- timestamp. No column can hold a message body, file content or key.
+CREATE TABLE IF NOT EXISTS data_lifecycle_audit (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id             TEXT,
+    principal           TEXT NOT NULL DEFAULT '',
+    tool                TEXT NOT NULL DEFAULT '',
+    mode                TEXT NOT NULL DEFAULT '',
+    action              TEXT NOT NULL,
+    status_code         INTEGER,
+    created_at_ms       INTEGER NOT NULL
+);
+
+-- ───────────────────────── Compute registry ─────────────────────────────
+-- One row per machine the operator admitted to the fleet. Registration is an
+-- operator action; a heartbeat updates the row but can never create one.
+CREATE TABLE IF NOT EXISTS compute_nodes (
+    node_id             TEXT PRIMARY KEY,
+    kind                TEXT NOT NULL CHECK (kind IN ('personal_node','dedicated_worker')),
+    label               TEXT NOT NULL DEFAULT '',
+    capabilities        TEXT NOT NULL DEFAULT '{}',
+    max_concurrent      INTEGER NOT NULL DEFAULT 1,
+    status              TEXT NOT NULL DEFAULT 'ready',
+    last_heartbeat_ms   INTEGER,
+    created_at_ms       INTEGER NOT NULL,
+    updated_at_ms       INTEGER NOT NULL
+);
+
+-- Live allocations. A row with status 'active' is a task currently allowed to
+-- run on a node; cleanup deletes by workspace so "no copies left" is one query.
+CREATE TABLE IF NOT EXISTS compute_allocations (
+    allocation_id       TEXT PRIMARY KEY,
+    workspace_id        TEXT NOT NULL,
+    node_id             TEXT NOT NULL,
+    policy_id           TEXT NOT NULL,
+    mode                TEXT NOT NULL,
+    capabilities        TEXT NOT NULL DEFAULT '[]',
+    approval_id         TEXT NOT NULL DEFAULT '',
+    status              TEXT NOT NULL DEFAULT 'active',
+    created_at_ms       INTEGER NOT NULL,
+    released_at_ms      INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS compute_allocations_workspace
+    ON compute_allocations (workspace_id, status);
+
+CREATE INDEX IF NOT EXISTS compute_allocations_node
+    ON compute_allocations (node_id, status);
+
+-- Every registration, heartbeat, allocation decision and cleanup. Refusals
+-- carry a named reason; no request body is ever copied here.
+CREATE TABLE IF NOT EXISTS compute_audit (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    node_id             TEXT,
+    workspace_id        TEXT,
+    action              TEXT NOT NULL,
+    outcome             TEXT NOT NULL,
+    reason              TEXT NOT NULL DEFAULT '',
+    status_code         INTEGER,
+    principal           TEXT NOT NULL DEFAULT '',
+    created_at_ms       INTEGER NOT NULL
+);
 """
 
 

@@ -78,7 +78,10 @@ AUDIT_RETENTION = 5000
 #: it on every request would turn a read-only status poll into a SQLite write.
 LAST_USED_RESOLUTION_MS = 60_000
 
-_SCOPE_PATTERN = re.compile(r"^(core|plugin):([a-z][a-z0-9_]{0,31}):(ro|rw)$")
+# The resource part allows hyphens because core URL segments do: the lifecycle
+# API lives at `/api/v1/data-lifecycle/…`, and a scope an operator cannot spell
+# after reading the route table would be a token that can never be minted.
+_SCOPE_PATTERN = re.compile(r"^(core|plugin):([a-z][a-z0-9_-]{0,31}):(ro|rw)$")
 
 
 def _now_ms() -> int:
@@ -502,6 +505,15 @@ def self_test() -> List[str]:
     raises("normalize_scopes_refuses_an_invalid_member", ValueError, lambda: normalize_scopes(["core:status:ro", "nope"]))
     raises("normalize_scopes_refuses_an_empty_list", ValueError, lambda: normalize_scopes([]))
     raises("normalize_scopes_refuses_too_many", ValueError, lambda: normalize_scopes(["core:r%d:ro" % i for i in range(17)]))
+    check("the_scope_grammar_accepts_a_hyphenated_core_resource",
+          validate_scope("core:data-lifecycle:ro")
+          and validate_scope("core:data-lifecycle:rw"))
+    check("a_hyphenated_scope_covers_its_route",
+          scope_allows({"root": False, "scopes": ["core:data-lifecycle:ro"]},
+                       resource_for_path("/api/v1/data-lifecycle/policies", {})[0])
+          and not scope_allows({"root": False, "scopes": ["core:data-lifecycle:ro"]},
+                               resource_for_path("/api/v1/data-lifecycle/erase", {})[0],
+                               write=True))
 
     prefixes = {"/api/v1/plugins/slackdiscord": "slack_discord"}
     check("the_slack_route_names_its_plugin_id", resource_for_path("/api/v1/plugins/slackdiscord/send", prefixes) == ("plugin:slack_discord", False))

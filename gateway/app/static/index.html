@@ -455,7 +455,16 @@ var API = {
   slackWorkspacePatch: ["PATCH", "/api/v1/plugins/slackdiscord/workspaces/{workspace_id}"],
   slackWorkspaceDel: ["DELETE", "/api/v1/plugins/slackdiscord/workspaces/{workspace_id}"],
   slackDiscordSend: ["POST", "/api/v1/plugins/slackdiscord/send"],
-  slackDiscordAudit: ["GET", "/api/v1/plugins/slackdiscord/audit"]
+  slackDiscordAudit: ["GET", "/api/v1/plugins/slackdiscord/audit"],
+
+  /* —— 隐私运行时：数据生命周期与算力 —— */
+  policies:       ["GET", "/api/v1/data-lifecycle/policies"],
+  policyPut:      ["PUT", "/api/v1/data-lifecycle/policies/{policy_id}"],
+  lifecycleErase: ["POST", "/api/v1/data-lifecycle/erase"],
+  computeNodes:   ["GET", "/api/v1/compute/nodes"],
+  nodeHeartbeat:  ["POST", "/api/v1/compute/nodes/{node_id}/heartbeat"],
+  computeAllocate:["POST", "/api/v1/compute/allocate"],
+  workspaceCleanup:["POST", "/api/v1/compute/workspaces/{workspace_id}/cleanup"]
 };
 
 /* 导航目标：不由 fetch 调用，而是拼成链接交给浏览器/手机打开。
@@ -502,6 +511,7 @@ var NAV = [
       { k: "workflows", n: "工作流与 DAV" }
   ] },
   { grp: "运维", items: [
+      { k: "runtime", n: "隐私运行时" },
       { k: "outbox", n: "出站队列" },
       { k: "callbacks", n: "回调" },
       { k: "tokens", n: "API 令牌" },
@@ -4143,6 +4153,139 @@ VIEWS.tokens = function (host) {
     return Promise.all([loadList(), loadAudit()]);
   }
   loadAll().catch(function (e) { renderError(listOut, e); });
+};
+
+/* ======================================================================== *
+ * 6j. 隐私运行时：数据生命周期与算力授权
+ * ======================================================================== */
+
+VIEWS.runtime = function (host) {
+  var polS = section("数据生命周期策略",
+    "零留存：正文只在进程内存中直通，首次投递即擦除；临时：按 TTL 清理状态与附件；用户自持：网关不留副本");
+  var eraseS = section("擦除与过期清理", "擦除请求只提交 id 或 scope，正文从不经过这里");
+  var nodeS = section("算力节点", "健康度由心跳时间推导；未注册的节点默认拒绝");
+  var allocS = section("分配与工作区清理", "默认拒绝：策略、健康节点、已声明能力与用户显式批准，缺一不可");
+  [polS, eraseS, nodeS, allocS].forEach(function (s) { host.appendChild(s.node); });
+
+  var polOut = h("div"), eraseOut = h("div"), nodeOut = h("div"), allocOut = h("div");
+
+  /* —— 策略 —— */
+  var polId = h("input", { class: "in", placeholder: "policy_id（如 scratch-24h）" });
+  var polMode = h("select", { class: "in" },
+    h("option", { value: "ephemeral", text: "ephemeral" }),
+    h("option", { value: "user_owned", text: "user_owned" }),
+    h("option", { value: "zero_retention", text: "zero_retention（仅内置 id）" }));
+  var polTtl = h("input", { class: "in", type: "number", min: "60", placeholder: "temporary_ttl_seconds" });
+  polS.body.appendChild(h("div", { class: "grid2" },
+    field("策略 id", polId, "小写字母开头，可含数字/_/-"),
+    field("模式", polMode, "内置策略的模式不可更改"),
+    field("TTL（秒）", polTtl, "仅 ephemeral 使用，60–2592000")));
+  polS.body.appendChild(h("div", { class: "row", style: "margin-top:10px" },
+    btn("保存策略", function () {
+      var body = { mode: polMode.value };
+      if (polMode.value === "ephemeral" && polTtl.value) body.temporary_ttl_seconds = n(polTtl.value);
+      return call("policyPut", { params: { policy_id: polId.value.trim() }, body: body })
+        .then(function (r) { polOut.appendChild(resultBox("策略已保存", r)); return loadPolicies(); });
+    }, { out: function () { return polOut; }, tone: "pri" }),
+    btn("重新读取策略", function () { return loadPolicies(); }, { out: function () { return polOut; }, tone: "gho" })));
+  var polTable = h("div");
+  polS.body.appendChild(polTable);
+  polS.body.appendChild(polOut);
+
+  /* —— 擦除 —— */
+  var erTask = h("input", { class: "in", placeholder: "task_id" });
+  var erWs = h("input", { class: "in", placeholder: "workspace_id" });
+  eraseS.body.appendChild(h("div", { class: "grid2" },
+    field("按任务擦除", erTask, "内存缓冲、状态行、临时附件与任务行一并删除"),
+    field("按工作区擦除", erWs, "该工作区名下所有生命周期行与内存缓冲")));
+  eraseS.body.appendChild(h("div", { class: "row", style: "margin-top:10px" },
+    btn("擦除任务", function () {
+      return call("lifecycleErase", { body: { task_id: erTask.value.trim() } })
+        .then(function (r) { eraseOut.appendChild(resultBox("擦除结果", r)); return loadPolicies(); });
+    }, { out: function () { return eraseOut; }, tone: "pri", confirm: "确认擦除该任务？不可恢复。" }),
+    btn("擦除工作区", function () {
+      return call("lifecycleErase", { body: { workspace_id: erWs.value.trim() } })
+        .then(function (r) { eraseOut.appendChild(resultBox("擦除结果", r)); return loadPolicies(); });
+    }, { out: function () { return eraseOut; }, tone: "pri", confirm: "确认擦除该工作区？不可恢复。" }),
+    btn("清理全部过期", function () {
+      return call("lifecycleErase", { body: { scope: "expired" } })
+        .then(function (r) { eraseOut.appendChild(resultBox("过期清理", r)); return loadPolicies(); });
+    }, { out: function () { return eraseOut; }, tone: "gho" })));
+  eraseS.body.appendChild(eraseOut);
+
+  /* —— 节点 —— */
+  var hbNode = h("input", { class: "in", placeholder: "node_id" });
+  nodeS.body.appendChild(h("div", { class: "row" },
+    btn("刷新节点", function () { return loadNodes(); }, { out: function () { return nodeOut; }, tone: "gho" }),
+    btn("发送心跳", function () {
+      return call("nodeHeartbeat", { params: { node_id: hbNode.value.trim() }, body: {} })
+        .then(function (r) { nodeOut.appendChild(resultBox("心跳已记录", r)); return loadNodes(); });
+    }, { out: function () { return nodeOut; }, tone: "pri" }),
+    h("span", { class: "grow" }), hbNode));
+  var nodeTable = h("div");
+  nodeS.body.appendChild(nodeTable);
+  nodeS.body.appendChild(nodeOut);
+
+  /* —— 分配 —— */
+  var apWs = h("input", { class: "in", placeholder: "workspace_id" });
+  var apNode = h("input", { class: "in", placeholder: "node_id" });
+  var apPolicy = h("input", { class: "in", placeholder: "policy_id（默认 zero_retention）", value: "zero_retention" });
+  var apCaps = h("input", { class: "in", placeholder: "能力，空格分隔（如 gpu label:llm）" });
+  var apId = h("input", { class: "in", placeholder: "approval_id（用户审批单号）" });
+  var apApproved = chk("用户已明确批准这次分配", false);
+  allocS.body.appendChild(h("div", { class: "grid2" },
+    field("工作区", apWs), field("节点", apNode),
+    field("策略", apPolicy), field("能力", apCaps),
+    field("审批单号", apId), field("用户批准", apApproved.node)));
+  allocS.body.appendChild(h("div", { class: "row", style: "margin-top:10px" },
+    btn("申请分配", function () {
+      var body = {
+        workspace_id: apWs.value.trim(), node_id: apNode.value.trim(),
+        policy_id: apPolicy.value.trim() || "zero_retention",
+        capabilities: apCaps.value.split(/[\s,]+/).filter(Boolean)
+      };
+      if (apApproved.get()) body.approval = { approved: true, approval_id: apId.value.trim() };
+      return call("computeAllocate", { body: body })
+        .then(function (r) { allocOut.appendChild(resultBox("分配结果", r)); return loadNodes(); });
+    }, { out: function () { return allocOut; }, tone: "pri" }),
+    btn("清理工作区", function () {
+      return call("workspaceCleanup", { params: { workspace_id: apWs.value.trim() } })
+        .then(function (r) { allocOut.appendChild(resultBox("工作区已清理", r)); return loadNodes(); });
+    }, { out: function () { return allocOut; }, tone: "gho" })));
+  allocS.body.appendChild(allocOut);
+
+  function loadPolicies() {
+    return call("policies").then(function (r) {
+      clear(polTable);
+      polTable.appendChild(tableOf([
+        { label: "policy_id", get: function (p) { return h("span", { class: "mono", text: p.policy_id }); } },
+        { label: "模式", get: function (p) { return chip(p.mode, p.builtin ? "" : "w"); } },
+        { label: "TTL", get: function (p) { return p.temporary_ttl_seconds ? String(p.temporary_ttl_seconds) + " 秒" : "—"; } },
+        { label: "内置", get: function (p) { return p.builtin ? "是" : "否"; } }
+      ], r.policies || []));
+      return r;
+    });
+  }
+  function loadNodes() {
+    return call("computeNodes").then(function (r) {
+      clear(nodeTable);
+      nodeTable.appendChild(tableOf([
+        { label: "node_id", get: function (x) { return h("span", { class: "mono", text: x.node_id }); } },
+        { label: "类型", get: function (x) { return x.kind; } },
+        { label: "健康", get: function (x) {
+            return chip(x.health, x.health === "healthy" ? "g" : x.health === "degraded" ? "w" : "b");
+          } },
+        { label: "心跳", get: function (x) {
+            return x.heartbeat_age_ms === null ? "从未" : String(Math.round(x.heartbeat_age_ms / 1000)) + " 秒前";
+          } },
+        { label: "并发", get: function (x) { return String(x.active_allocations) + "/" + String(x.max_concurrent_tasks); } },
+        { label: "能力", get: function (x) { return (x.capability_tokens || []).join(" "); } }
+      ], r.nodes || []));
+      return r;
+    });
+  }
+  loadPolicies().catch(function (e) { renderError(polOut, e); });
+  loadNodes().catch(function (e) { renderError(nodeOut, e); });
 };
 
 VIEWS.settings = function (host) {

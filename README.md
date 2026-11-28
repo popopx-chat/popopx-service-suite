@@ -44,9 +44,11 @@ popopx-service-suite/
 └── gateway/
     ├── Dockerfile
     ├── requirements.txt     fastapi / uvicorn / pydantic / cryptography / httpx / qrcode / websockets
-    ├── requirements-dev.txt 同一批运行时依赖 + pytest（测试适配器用，生产启动器不读）
-    ├── tests/               pytest 适配器：调用各模块 self_test()，不复制断言
+    ├── requirements-dev.txt 同一批运行时依赖 + pytest（生产启动器不读）
+    ├── tests/               pytest：self_test 适配器 + 数据生命周期/算力授权单元测试
     └── app/                 config database admin_auth vault billing_service crypto_service agent_bridge main
+        ├── data_lifecycle/  policy retention audit policy_engine cleanup
+        ├── compute/         registry authorizer
         ├── plugins/         ai_agent alert_ops privacy_sso polls web3_bridge
         │                    workflow_webhook carddav_connector caldav_connector slack_discord
         └── static/          index.html 管理后台
@@ -59,8 +61,8 @@ popopx-service-suite/
 - 起服务要 Python 3.11 加 `gateway/requirements.txt` 里的 wheel。没装这些 wheel 的机器上并
   没有「降级 HTTP 路径」这回事：`create_app()` 直接抛 `RuntimeError: FastAPI is not installed;
   run ./start_macos.sh, ./install_macos.sh or ./install_ubuntu22.sh first`（后面拼 `ImportError` 原文，见
-  `gateway/app/main.py:3385`）。这种机器能做的是跑 22 组自检里的 19 组——运行器会把依赖那两个
-  wheel 的组点名 `SKIPPED`。下面「自检」里的 **2637 条 / 19 组** 就是这么来的，它不是一台正在
+  `gateway/app/main.py:3396`）。这种机器能做的是跑 29 组自检里的 26 组——运行器会把依赖那两个
+  wheel 的组点名 `SKIPPED`。下面「自检」里的 **2778 条 / 26 组** 就是这么来的，它不是一台正在
   应答的网关。
 - 需要一个正在运行的 `popopx-agent` / `popopx-chat` 节点，它的 WebSocket 控制口在
   `127.0.0.1:5225`。没有节点也能起服务，见下面「启动行为与插件开关」。
@@ -153,7 +155,7 @@ Crashed=true}`、`RestartSec=3`→`ThrottleInterval=3`（那是最短间隔的�
 本机离线实测到的：`--help`、`--check`、`--dry-run`（含 `--with-node`）全部退出 0，两个 plist
 `plutil -lint` 通过，dry-run 里"已存在的 env 逐字节不变、只多一个 `.bak.<utc>`"这条由 cksum 现场
 证明；`brew` 装的 Python 3.11.18 过了版本门，用它按 `gateway/requirements.txt` 实装依赖建一个 venv，
-`--self-test` 实测 **2776 条 / 22 组、exit 0**（这一跑顺手揪出一个只在新版 starlette 上失明的 HTTP
+`--self-test` 实测 **2932 条 / 29 组、exit 0**（这一跑顺手揪出一个只在新版 starlette 上失明的 HTTP
 量具，见「自检」）。
 
 带 sudo 的真装真起 **2026-11-22 在这台 Mac 上跑过了**：`/Library/LaunchDaemons/com.popopx.gateway.plist`
@@ -401,24 +403,65 @@ curl -s $API/api/v1/admin/tokens/audit?limit=20 -H "X-Admin-Token: $TOKEN"
 接受命令之后才报 `queued`；节点拒了是 502 `node_refused` 并在 `node_error` 里带节点自己给的原因；
 粉丝不存在是 400 `unknown_contact`，本地先查完，根本不会去问节点。
 
+## 隐私运行时：数据生命周期与算力授权
+
+`gateway/app/data_lifecycle/` 把「数据能留多久」变成三档可审计策略，`gateway/app/compute/` 把
+「哪台机器可以算」变成默认拒绝的授权链。两者都不改零知识频道协议，也不改既有服务号路由。
+
+保留策略（`GET /api/v1/data-lifecycle/policies`；内置策略是虚拟常量，读取不写库）：
+
+| policy_id | 行为 | 落库内容 |
+| --- | --- | --- |
+| `zero_retention` | 正文只存在于网关进程内存；`ZeroRetentionBroker` 在调用交付 sink 前先 pop，finally 覆写缓冲区 | 只有审计行：任务 id、授权主体、工具名、模式、动作、状态码、时间 |
+| `ephemeral` | 任务行 + 状态行，按 `temporary_ttl_seconds`（60–2592000，默认 3600）过期；`sweep_expired` 连同临时附件一起删 | 任务元数据、状态 JSON、附件指针，到期即删 |
+| `user_owned` | 内容留在用户设备；即使调用时带了 payload 也直接丢弃 | 只有 `device_only` 元数据行 |
+
+`PUT /api/v1/data-lifecycle/policies/{policy_id}` 可以调整 TTL 等参数，但**模式不可变**：
+`zero_retention` 不能被改成会落库的档位。自定义策略 id 允许小写字母、数字、`_` 与 `-`。
+`POST /api/v1/data-lifecycle/erase` 接受 `task_id`、`workspace_id` 或 `scope: "expired"`，
+擦除是幂等的；零留存任务没有任务行，擦除命中的是内存缓冲。临时附件只经 `TempArea` 删除：
+0700 目录、0600 文件、路径必须解析在根目录内，数据库里的历史路径不能指挥删除 `/etc`。
+
+审计（`app/data_lifecycle/audit.py`）只接受固定字段，`payload=` / `detail=` 这类关键字直接
+`TypeError`；表结构里没有能装正文、文件内容或密钥的列。pytest 会把每个 `*.db*` 文件按字节扫一遍，
+并用一条**故意会落库**的 ephemeral 状态做对照，证明扫描能找到该找到的文本。
+
+算力注册表（`GET /api/v1/compute/nodes`）区分 `personal_node` 与 `dedicated_worker`：
+能力画像只接受 `cpu_cores`、`memory_mb`、`gpu`、`labels`、`max_concurrent_tasks`，未知键是
+校验错误而不是被悄悄丢掉。健康度由 `last_heartbeat_ms` 推导：≤90 秒 `healthy`，≤300 秒
+`degraded`，再久 `offline`，从未心跳 `unknown`；注册是运营动作，`POST
+/api/v1/compute/nodes/{node_id}/heartbeat` **永远不会**顺手注册一个新节点。
+
+`POST /api/v1/compute/allocate` 的顺序是固定的：未知策略 400 → 未注册节点 404 → 非健康节点
+409 → 未声明能力 403 → 缺用户批准 403 → 并发已满 409；全部通过才写一行 `active` 的
+`compute_allocations`。批准必须是 `{"approved": true, "approval_id": "…"}`——`"yes"` 和 `1`
+都不算，字符串真值不能代替人点过按钮。每次拒绝都进 `compute_audit`，带具名原因与授权主体，
+不复制请求正文。`POST /api/v1/compute/workspaces/{workspace_id}/cleanup` 按工作区释放分配。
+
+范围令牌现在能写 `core:data-lifecycle:ro|rw` 与 `core:compute:ro|rw`：资源名允许连字符，
+与 URL 段一致。还没有 HTTP 注册端点——注册目前是运维侧调用 `registry.register_node`；
+`allocate` 记录的是控制面决定，不负责把任务投递到节点，实际执行通道仍是插件/节点层。
+
 ## 接口一览
 
-129 条路由。本文件声明的 59 条由 `python3 -m app.main --print-routes` 打印，同一条命令顺手断言
+136 条路由。本文件声明的 66 条由 `python3 -m app.main --print-routes` 打印，同一条命令顺手断言
 "每条管理路由都被 token 盖住"；九个插件另贡献 70 条（`workflow_webhook` 12、`alert_ops` 10、
 `web3_bridge` 9、`polls` 8、`ai_agent` 6、`privacy_sso` 6、`carddav_connector` 6、
 `caldav_connector` 6、`slack_discord` 7），它们走 `include_router` 进来，`--print-routes` 看不见，
 所以自检里有 `every_plugin_*` 与逐插件的 `plugin_<id>_answers_status_at_its_own_prefix` 补上另一半。
+新增的七条是数据生命周期三条（`GET`/`PUT` 策略、`POST` 擦除）与算力四条
+（`POST` 分配、`GET` 节点、`POST` 心跳、`POST` 工作区清理）。
 
 鉴权只有一条规则：`/api/v1/*` 要管理凭据，也收 `?token=`；缺失或不对一律
 `401 {"ok":false,"error":"unauthorized"}`，凭据有效但 scope 不够是 403。凭据可以是根令牌
 （`POPOPX_ADMIN_TOKEN`），也可以是 `POST /api/v1/admin/tokens` 铸出的 `pxa_…` scoped 令牌；
 两者都接受 `x-admin-token`、`X-Popopx-Admin-Token`、`Authorization: Bearer` 与 `?token=`
-这四种写法（`admin_auth.presented_credential`，`gateway/app/admin_auth.py:202`）。核心
+这四种写法（`admin_auth.presented_credential`，`gateway/app/admin_auth.py:205`）。核心
 `admin_required` 与插件中间件 `admin_gate` 都走同一个解析器
-（`gateway/app/main.py:3461`、`:3583`），不再各自拼一套头名判断；`privacy_sso` 的设备侧
+（`gateway/app/main.py:3481`、`:3603`），不再各自拼一套头名判断；`privacy_sso` 的设备侧
 路由仍只认 `Authorization`（`privacy_sso_plugin.py:1522` `bearer_secret`），`alert_ops` 的
 控制台路由也兼容 `X-Popopx-Admin-Token`（`alert_ops_plugin.py:1216`）。管理后台三个头
-一起发（`gateway/app/static/index.html:642`–`:644`），一个令牌不用按路由切换。五类例外：
+一起发（`gateway/app/static/index.html:652`–`:654`），一个令牌不用按路由切换。五类例外：
 `/`、`/healthz`、`/h5/{article_id}` 公开；
 `POST /api/v1/verifyH5Auth` 靠手机侧的 HMAC 签名证明调用者；`POST /api/v1/workflows/trigger`
 只认 `X-PPX-Workflow-Token`（带过期、可撤销、按 scope 拒绝），管理令牌对它是无意义的；插件路径以 `/webhook`、`/verify`、
@@ -466,7 +509,7 @@ macOS 在 `/usr/local/etc/popopx-service-suite/env`——launchd 没有 `Environ
 
 ## 自检
 
-每个模块都自带 `self_test()`，共 22 组，用下面这条命令一次性跑完：
+每个模块都自带 `self_test()`，共 29 组，用下面这条命令一次性跑完：
 
 ```bash
 # 两个代码块都从仓库根目录起跑
@@ -477,22 +520,28 @@ cd gateway && python3 -m app.main --self-test
 token 盖住的_admin 路由就不该开始监听），完整套件是开发/发布前的入口，三条命令分别由
 `start_macos.sh`、`install_macos.sh` 与 `install_ubuntu22.sh` 在最后一步打印出来供复制。
 
-权威计数是这条命令自己打出来的最后一行。本机 2026-11-26 用 `/usr/bin/python3` 跑只有标准库那一档
-（`cryptography` 和 `fastapi` 都没装），实测是 **2637 条 / 19 组**：`app.crypto_service.crypto_self_test`（缺 `cryptography`）、
+权威计数是这条命令自己打出来的最后一行。本机 2026-11-28 用 `/usr/bin/python3` 跑只有标准库那一档
+（`cryptography` 和 `fastapi` 都没装），实测是 **2778 条 / 26 组**：`app.crypto_service.crypto_self_test`（缺 `cryptography`）、
 `app.opaque_invite_codec.opaque_invite_self_test`（同样缺 `cryptography`）和 `app.main.http_self_test`（缺 `fastapi`）
 三组被运行器点名 `SKIPPED`，并打印 "those paths are NOT verified here"——这三组在本机一条都没跑过，不是"跑过了没记上"。
-同一台机器上换一个装了 `gateway/requirements.txt` 的 venv 再跑，实测 **2776 条 / 22 组**，多出来的
+同一台机器上换一个装了 `gateway/requirements.txt` 的 venv 再跑，实测 **2932 条 / 29 组**，多出来的
 正是那三组加 vault 的真实密码学分支：运行器逐组打印 `crypto_self_test 6 checks`、
-`http_self_test 67 checks` 与 `opaque_invite_codec.opaque_invite_self_test 50 checks`，而
+`http_self_test 82 checks` 与 `opaque_invite_codec.opaque_invite_self_test 50 checks`，而
 `app.vault` 在有 `cryptography` 时是 29 条、没有时只有 13 条（16 条真实封装/解封检查被换成一个
-具名的 `VaultUnavailable` 断言），所以 2637 + 6 + 50 + 67 + 16 = 2776。协议层在两种解释器下
+具名的 `VaultUnavailable` 断言），所以 2778 + 6 + 50 + 82 + 16 = 2932。协议层在两种解释器下
 都是同样的 308 条；缺少 `cryptography` 时新增的 invite 断言改为验证
-`invite_crypto_unavailable` 这一具名降级答复，而不是悄悄跳过。上面每一档都在 2026-11-26 重测过：
+`invite_crypto_unavailable` 这一具名降级答复，而不是悄悄跳过。上面每一档都在 2026-11-28 重测过：
 仓库 `.venv` 的 3.9.6（fastapi 0.128.8）与 `brew` 装的 3.11.18（fastapi 0.165.0）各建一个 venv，
-两边同为 **2776 条 / 22 组、exit 0**。连接器那五组是 `app.connectors`（34）、`workflow_webhook_plugin`
+两边同为 **2932 条 / 29 组、exit 0**。连接器那五组是 `app.connectors`（34）、`workflow_webhook_plugin`
 （57）、`carddav_connector`（43）、`caldav_connector`（48）与 `slack_discord_plugin`（27）；它们把
 HMAC/SSRF、令牌过期与撤销、vCard 敏感字段剥离、CalDAV 标题零泄漏、逐工作区签名与失败退款
-都放进了可执行断言。作用域令牌那组是 `app.admin_auth`（51），静态加密是 `app.vault`（29）。
+都放进了可执行断言。作用域令牌那组是 `app.admin_auth`（53，新增 2 条证明
+`core:data-lifecycle:ro|rw` 这种带连字符的资源名可以通过解析、且 `ro` 只覆盖 GET），静态加密是 `app.vault`（29）。
+数据生命周期五组是 `app.data_lifecycle.policy`（26）、`retention`（13）、`audit`（14）、
+`policy_engine`（20）与 `cleanup`（14）；算力授权两组是 `app.compute.registry`（29）与
+`app.compute.authorizer`（23）。七组合计 139 条，直接覆盖「内存直通不落库」「按策略擦除」
+「审计无正文」与「节点权限默认拒绝」四个场景；HTTP 组新增的 15 条把七个新路由从 401/403
+一路打到真实返回体，包括带连字符作用域令牌的读/写分离。
 后一次不是重复劳动：`requirements.txt` 钉的是区间，新 venv 因此拿到 fastapi 0.165.0 + starlette 1.10.0，
 而 starlette 1.x 的 `include_router` 不再把插件路由摊平进 `app.routes`（改成挂一个嵌套的
 `_IncludedRouter`），HTTP 组按 `isinstance(r, APIRoute)` 读一遍就少了 30 条插件路由、报出
@@ -508,21 +557,26 @@ OpenAPI 里也在——是量具瞎了，不是网关坏了。所以那条检查
 监听口、回非 HTTP 字节，让库自己决定异常类；最后一条直接断言 `start()` 兜底的类清单和装没装
 `websockets` 一致——缺 wheel 那档断言的是三元回退表，不是"跳过"，所以它不会在测不到的配置里悄悄为真。
 
-断言分布在：协议层、数据库、配置、作用域令牌、静态加密、计费、密码学、节点桥、九个插件、
-跨实现密码学、以及 HTTP 组 `app.main.http_self_test`——最后一组真的向 ASGI 应用发请求，所以它能
-证明一个路由是被装上了还是只是写在源码里。
+断言分布在：协议层、数据库、配置、作用域令牌、静态加密、计费、密码学、节点桥、数据生命周期、
+算力授权、九个插件、跨实现密码学、以及 HTTP 组 `app.main.http_self_test`——最后一组真的向 ASGI
+应用发请求，所以它能证明一个路由是被装上了还是只是写在源码里。
 
-`--self-test` 仍是唯一的真值门。`gateway/tests/` 只是 pytest 的薄适配器：参数化
+`--self-test` 仍是唯一的真值门。`gateway/tests/` 的适配器参数化
 `SELF_TEST_MODULES` 并调用同一个 `self_test()`，对 `crypto_self_test`、
 `opaque_invite_self_test`、`http_self_test` 用 `importorskip` 保持与运行器相同的
 SKIPPED 语义，再调一次 `assert_routes_are_gated()`；它没有复制任何一条断言。
+另外两个专用文件不经过 `self_test()`，从 API 语义层重证那四个场景：
+`test_data_lifecycle.py`（9 条）把每个 `*.db*` 文件按字节扫一遍、并用一条会落库的
+ephemeral 状态做对照证明扫描非空转，还证明失败投递仍擦除并记 `reject`、擦除幂等且审计列固定；
+`test_compute.py`（13 条）逐一拒绝未注册/未心跳/未声明能力/未批准/超并发，断言一次成功分配
+只写一行，且拒绝不把请求正文复制进 `compute_audit`。
 
 ```bash
 # 同样从仓库根目录（跑过上一块就先 cd ..）
 python3.11 -m venv .venv                      # 3.11 是这套件的目标解释器，见 requirements.txt 头几行
 .venv/bin/pip install -r gateway/requirements-dev.txt
-cd gateway && ../.venv/bin/python -m app.main --self-test   # 22 组全绿、无 SKIPPED（本机实测 2776 条）
-../.venv/bin/python -m pytest                                # 22 passed：同一批 helper，不重复断言
+cd gateway && ../.venv/bin/python -m app.main --self-test   # 29 组全绿、无 SKIPPED（本机实测 2932 条）
+../.venv/bin/python -m pytest                                # 51 passed：29 条适配器 + 22 条专用断言
 ```
 
 ## 跨实现密码学校验
@@ -597,6 +651,13 @@ cd gateway && python3 ../official_tools/gen_voucher.py --help
   文件，而且**这套件不做轮转**：newsyslog 要移动 launchd 已经握着的 fd，安全做法是 `mv` 之后立刻
   `sudo launchctl kickstart -k system/com.popopx.gateway` 让服务重新开文件，安装器的 NEXT STEPS 里
   写的就是这条，不是一个假装能自动滚动的配置。
+- 零留存的边界是「不写数据库」而不是「防内存转储」：投递后缓冲区被原地覆写，但 Python 可能早已
+  复制过字节，swap、核心转储与有权限读进程内存的对手不在防护内。`TempArea` 的删除也只在调用方
+  把同一个 area 传给擦除/清扫时才会发生——库里残留的历史路径自己不会删任何东西。
+- 算力注册没有 HTTP 端点，注册目前是运维侧调用 `registry.register_node`；`POST
+  /api/v1/compute/allocate` 记录的是控制面分配决定，不负责把任务投递到节点。真实 Personal Node /
+  Dedicated Worker、GPU 与公网心跳的行为**未验证**，本机只验证了注册表/授权器的单元语义与 HTTP
+  语义。审计行可被有库读写权限的人删除或改写，它不是 WORM 存储。
 - 还没做的：拿真实 iOS 客户端跑端到端收发（要一个能连上的 broker），以及
   `userContactLinkCreated` 成功帧的形状——手上只有失败帧，所以 `show_contact_address()` 只按
   `userContactLinkNotFound` 这一条判"还没有地址"，其他拒绝照原样抛出。上面所有绿色都是本机可复现

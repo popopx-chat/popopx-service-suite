@@ -52,8 +52,10 @@ popopx-service-suite/
     ├── Dockerfile
     ├── requirements.txt     fastapi / uvicorn / pydantic / cryptography / httpx / qrcode / websockets
     ├── requirements-dev.txt the same runtime set plus pytest (test adapter only; no launcher reads it)
-    ├── tests/               pytest adapter over each module's self_test(); no duplicated assertions
+    ├── tests/               pytest adapter over each module's self_test() + lifecycle/compute unit tests
     └── app/                 config database admin_auth vault billing_service crypto_service agent_bridge main
+        ├── data_lifecycle/  policy retention audit policy_engine cleanup
+        ├── compute/         registry authorizer
         ├── plugins/         ai_agent alert_ops privacy_sso polls web3_bridge
         │                    workflow_webhook carddav_connector caldav_connector slack_discord
         └── static/          index.html admin console
@@ -67,9 +69,9 @@ popopx-service-suite/
   reduced server for a machine without them: `create_app()` raises `RuntimeError: FastAPI is
   not installed; run ./start_macos.sh, ./install_macos.sh or ./install_ubuntu22.sh first`, with
   the `ImportError`
-  text appended (`gateway/app/main.py:3385`). What a standard-library-only machine *can* do is
-  run 19 of the 22 self-test groups, because the runner names the three that need those wheels
-  as `SKIPPED` — that is what the **2637 checks across 19 groups** figure below is, and it is
+  text appended (`gateway/app/main.py:3396`). What a standard-library-only machine *can* do is
+  run 26 of the 29 self-test groups, because the runner names the three that need those wheels
+  as `SKIPPED` — that is what the **2778 checks across 26 groups** figure below is, and it is
   not a gateway answering requests.
 - A running `popopx-agent` / `popopx-chat` node exposing its WebSocket control API on
   `127.0.0.1:5225`.
@@ -189,7 +191,7 @@ Measured offline on this machine: `--help`, `--check` and `--dry-run` (including
 all exit 0, both plists pass `plutil -lint`, and the dry-run proves with `cksum` that a
 pre-existing env file survives byte-identical with one `.bak.<utc>` added. `brew`'s Python 3.11.18
 passes the interpreter gate, and a venv built from it with `gateway/requirements.txt` actually
-installed measures **2776 checks across 22 groups, exit 0** on `--self-test` (that run also caught
+installed measures **2932 checks across 29 groups, exit 0** on `--self-test` (that run also caught
 an HTTP instrument that goes blind only on the newer starlette — see **Self-test** below).
 
 The sudo install that really starts the service **was run on this Mac on 2026-11-22**:
@@ -422,11 +424,11 @@ Every `/api/v1/` call takes a credential: either the root admin token in a heade
 query parameter is also accepted) or a scoped `pxa_…` token minted at
 `POST /api/v1/admin/tokens`. Four spellings are accepted everywhere —
 `x-admin-token`, `X-Popopx-Admin-Token`, `Authorization: Bearer` and `?token=` — and a scoped
-token without the required scope gets 403 rather than 401 (`admin_auth.py:202`). The one
+token without the required scope gets 403 rather than 401 (`admin_auth.py:205`). The one
 deployment-visible exception is `privacy_sso`'s device-facing route, whose device secret is
 also read as a bearer credential (`privacy_sso_plugin.py:1522`); `alert_ops`' webhook keeps
 its own shared token (`alert_ops_plugin.py:1216`). The console sends header and query at once
-(`gateway/app/static/index.html:642`–`:644`) so one token works whichever route it lands on.
+(`gateway/app/static/index.html:652`–`:654`) so one token works whichever route it lands on.
 Field names below are the ones the handlers read.
 
 ```bash
@@ -487,28 +489,79 @@ accepted the command. A refusal is a 502 `node_refused` carrying the node's own 
 `node_error`; a missing follower is a 400 `unknown_contact`, checked locally before the node is
 asked at all.
 
+## Privacy runtime: data lifecycle and compute authorization
+
+`gateway/app/data_lifecycle/` turns "how long may a byte live" into three auditable policies;
+`gateway/app/compute/` turns "which machine may compute" into a default-deny authorization chain.
+Neither changes the zero-knowledge channel protocol or any existing service-account route.
+
+Retention policies (`GET /api/v1/data-lifecycle/policies`; the built-ins are virtual constants,
+so a read writes nothing):
+
+| policy_id | behaviour | what reaches the database |
+| --- | --- | --- |
+| `zero_retention` | the body lives only in the gateway process; `ZeroRetentionBroker` pops the entry before calling the delivery sink and overwrites the buffer in `finally` | audit rows only: task id, principal, tool, mode, action, status code, timestamp |
+| `ephemeral` | a task row plus a state row expiring after `temporary_ttl_seconds` (60–2592000, default 3600); `sweep_expired` deletes the state and its temporary attachment | task metadata, state JSON, attachment pointer, gone at expiry |
+| `user_owned` | the content stays on the user's device; a payload handed to the call is dropped | a `device_only` metadata row |
+
+`PUT /api/v1/data-lifecycle/policies/{policy_id}` can adjust TTLs but the **mode is immutable**:
+`zero_retention` cannot be turned into a storing tier. Custom ids accept lowercase letters,
+digits, `_` and `-`. `POST /api/v1/data-lifecycle/erase` takes `task_id`, `workspace_id` or
+`scope: "expired"`, and erasure is idempotent; a zero-retention task has no row, so the erase
+hits the in-memory buffer. Temporary attachments are removed only through `TempArea`: a 0700
+directory, 0600 files, and a path that must resolve inside the root — a stored path cannot
+direct a delete at `/etc`.
+
+`app/data_lifecycle/audit.py` accepts a fixed field set: `payload=` or `detail=` is a
+`TypeError`, and the table has no column that could hold a body, file content or key. pytest
+scans every `*.db*` file byte-wise and plants an ephemeral state that *does* reach disk, proving
+the scan finds what it should.
+
+The compute registry (`GET /api/v1/compute/nodes`) distinguishes `personal_node` from
+`dedicated_worker`: the capability profile accepts only `cpu_cores`, `memory_mb`, `gpu`,
+`labels` and `max_concurrent_tasks`, and an unknown key is a validation error rather than being
+silently dropped. Health is derived from `last_heartbeat_ms`: ≤90 s `healthy`, ≤300 s
+`degraded`, then `offline`, and `unknown` before the first beat; registration is an operator
+action, and `POST /api/v1/compute/nodes/{node_id}/heartbeat` **never** registers a new node.
+
+`POST /api/v1/compute/allocate` has a fixed order: unknown policy 400 → unregistered node 404 →
+unhealthy node 409 → undeclared capability 403 → user approval missing 403 → at capacity 409;
+only then is an `active` row written to `compute_allocations`. Approval must be
+`{"approved": true, "approval_id": "…"}` — `"yes"` and `1` do not count; a truthy string is not
+a human pressing a button. Every refusal lands in `compute_audit` with a named reason and the
+principal, without copying the request body. `POST
+/api/v1/compute/workspaces/{workspace_id}/cleanup` releases allocations by workspace.
+
+Scoped tokens can now say `core:data-lifecycle:ro|rw` and `core:compute:ro|rw`: resource names
+allow hyphens, matching the URL segment. There is no HTTP registration endpoint yet —
+registration is the operator-side `registry.register_node` call; `allocate` records the
+control-plane decision and does not dispatch a task to the node, whose execution path remains
+the plugin/node layer.
+
 ## API overview
 
-129 routes. The 59 declared in this file's tree are printed by
+136 routes. The 66 declared in this file's tree are printed by
 `python3 -m app.main --print-routes`, which also asserts that every admin route is covered by
 the token. The nine plugins add the other 70 (`workflow_webhook` 12, `alert_ops` 10,
 `web3_bridge` 9, `polls` 8, `ai_agent` 6, `privacy_sso` 6, `carddav_connector` 6,
 `caldav_connector` 6, `slack_discord` 7); they arrive through `include_router`, invisible to
 `--print-routes`, so `every_plugin_*` plus a per-plugin
-`plugin_<id>_answers_status_at_its_own_prefix` cover the second half in the self-test.
+`plugin_<id>_answers_status_at_its_own_prefix` cover the second half in the self-test. The
+seven new ones are the three data-lifecycle routes (`GET`/`PUT` policies, `POST` erase) and the
+four compute routes (`POST` allocate, `GET` nodes, `POST` heartbeat, `POST` workspace cleanup).
 
 Authorisation is one rule: `/api/v1/*` requires a credential and also accepts `?token=`; a
 missing or wrong credential is always `401 {"ok":false,"error":"unauthorized"}`, while a valid
 credential with an insufficient scope is 403. The credential is either the root token
 (`POPOPX_ADMIN_TOKEN`) or a scoped `pxa_…` token minted at `POST /api/v1/admin/tokens`; both
 are accepted as `x-admin-token`, `X-Popopx-Admin-Token`, `Authorization: Bearer` and
-`?token=` (`admin_auth.presented_credential`, `gateway/app/admin_auth.py:202`). Core
+`?token=` (`admin_auth.presented_credential`, `gateway/app/admin_auth.py:205`). Core
 `admin_required` and the plugin middleware `admin_gate` share that resolver
-(`gateway/app/main.py:3461`, `:3583`) instead of each assembling its own header test;
+(`gateway/app/main.py:3481`, `:3603`) instead of each assembling its own header test;
 `privacy_sso`'s device-facing route still reads only `Authorization`
 (`privacy_sso_plugin.py:1522` `bearer_secret`), and `alert_ops`' console routes also accept
 `X-Popopx-Admin-Token` (`alert_ops_plugin.py:1216`). The console sends all three at once
-(`gateway/app/static/index.html:642`–`:644`) so one token works whichever route it lands on.
+(`gateway/app/static/index.html:652`–`:654`) so one token works whichever route it lands on.
 Five classes of exception: `/`, `/healthz` and `/h5/{article_id}` are public;
 `POST /api/v1/verifyH5Auth` proves its caller with a device-side HMAC instead of a token;
 `POST /api/v1/workflows/trigger` accepts only `X-PPX-Workflow-Token` (expiring, revocable,
@@ -566,7 +619,7 @@ non-boolean switch. Unrecognised `POPOPX_*` keys are ignored, not an error.
 
 ## Self-test
 
-Every module ships a `self_test()`; 22 groups in total, run in one command:
+Every module ships a `self_test()`; 29 groups in total, run in one command:
 
 ```bash
 # both code blocks start from the repository root
@@ -578,29 +631,37 @@ The startup path does not run the suite — `create_app()` only runs the route g
 The full suite is the pre-release entry point, and the three commands it needs are printed for
 copying as the last step by `start_macos.sh`, `install_macos.sh` and `install_ubuntu22.sh`.
 
-The authoritative count is the last line that command prints. On this machine on 2026-11-26
+The authoritative count is the last line that command prints. On this machine on 2026-11-28
 `/usr/bin/python3` has only the standard library (no `cryptography`, no `fastapi`), and the
-measured result was **2637 checks across 19 groups**: `app.crypto_service.crypto_self_test` (needs
+measured result was **2778 checks across 26 groups**: `app.crypto_service.crypto_self_test` (needs
 `cryptography`), `app.opaque_invite_codec.opaque_invite_self_test` (also `cryptography`) and
 `app.main.http_self_test` (needs `fastapi`) were named as `SKIPPED` by the runner, which prints
 "those paths are NOT verified here" — those three groups ran zero checks here, which is not the
 same as having run and not been counted. Re-running on the same machine inside a venv that has
-`gateway/requirements.txt` installed measured **2776 checks across 22 groups**, and the
+`gateway/requirements.txt` installed measured **2932 checks across 29 groups**, and the
 difference is exactly those three groups plus the vault's real-cryptography branch: the runner
-prints `crypto_self_test 6 checks`, `http_self_test 67 checks` and
+prints `crypto_self_test 6 checks`, `http_self_test 82 checks` and
 `opaque_invite_codec.opaque_invite_self_test 50 checks` per group, while `app.vault` reports
 29 checks with `cryptography` present and only 13 without it (16 real seal/open checks are
-replaced by a named `VaultUnavailable` assertion), so `2637 + 6 + 50 + 67 + 16 = 2776`. The
+replaced by a named `VaultUnavailable` assertion), so `2778 + 6 + 50 + 82 + 16 = 2932`. The
 protocol layer is the same 308 checks on both interpreters: without `cryptography` the new
 invite assertions verify the named `invite_crypto_unavailable` degradation instead of being
-skipped. Every figure above was re-measured on 2026-11-26: the repository `.venv`'s 3.9.6
+skipped. Every figure above was re-measured on 2026-11-28: the repository `.venv`'s 3.9.6
 (fastapi 0.128.8) and a fresh venv built from `brew`'s Python 3.11.18 (fastapi 0.165.0) both
-measure **2776 checks across 22 groups, exit 0**.
+measure **2932 checks across 29 groups, exit 0**.
 The five connector groups are `app.connectors` (34), `workflow_webhook_plugin` (57),
 `carddav_connector` (43), `caldav_connector` (48) and `slack_discord_plugin` (27); HMAC/SSRF
 refusal, token expiry and revocation, vCard stripping, zero CalDAV title leakage, per-workspace
 signing and failed-delivery refunds are executable assertions. The scoped-token group is
-`app.admin_auth` (51); encryption at rest is `app.vault` (29).
+`app.admin_auth` (53; two new checks prove a hyphenated `core:data-lifecycle:ro|rw` resource
+parses and that `ro` covers GET only); encryption at rest is `app.vault` (29).
+The five data-lifecycle groups are `app.data_lifecycle.policy` (26), `retention` (13), `audit`
+(14), `policy_engine` (20) and `cleanup` (14); the two compute groups are
+`app.compute.registry` (29) and `app.compute.authorizer` (23). Those seven groups hold 139
+checks and cover the four required scenarios directly: in-memory pass-through never reaching
+the database, policy-driven erasure, content-free auditing, and default-deny node permissions;
+the HTTP group added 15 checks that drive the seven new routes from 401/403 to real bodies,
+including read/write separation for a hyphenated scoped token.
 The second run was not a formality: `requirements.txt` pins ranges, so the new venv resolved
 fastapi 0.165.0 with starlette 1.10.0, and starlette 1.x no longer flattens an
 `include_router()` into `app.routes` — it keeps one nested `_IncludedRouter` in their place.
@@ -624,22 +685,28 @@ whether or not `websockets` is installed — on a wheel-less machine it asserts 
 fallback rather than skipping, so it cannot quietly read true on the configuration it cannot test.
 
 Assertions cover the protocol layer, database, configuration, scoped tokens, encryption at
-rest, billing, cryptography, the node bridge, the nine plugins, cross-implementation
-cryptography, and the HTTP group `app.main.http_self_test` — that last one issues real requests
+rest, billing, cryptography, the node bridge, data lifecycle, compute authorization, the nine
+plugins, cross-implementation cryptography, and the HTTP group `app.main.http_self_test` — that last one issues real requests
 against the ASGI app, so it can tell a mounted route from a route that merely exists in source.
 
-`--self-test` stays the only truth gate. `gateway/tests/` is a thin pytest adapter: it
-parametrises `SELF_TEST_MODULES` and calls the same `self_test()`, uses `importorskip` for
+`--self-test` stays the only truth gate. The `gateway/tests/` adapter parametrises
+`SELF_TEST_MODULES` and calls the same `self_test()`, uses `importorskip` for
 `crypto_self_test`, `opaque_invite_self_test` and `http_self_test` to keep the runner's
 SKIPPED semantics, then calls `assert_routes_are_gated()` once; it does not copy a single
-assertion.
+assertion. Two dedicated files bypass `self_test()` and re-prove the four scenarios at the
+API level: `test_data_lifecycle.py` (9 cases) scans every `*.db*` file byte-wise with an
+ephemeral control that does reach disk, proves a failed delivery still wipes and audits
+`reject`, and proves erasure is idempotent with a fixed audit column set;
+`test_compute.py` (13 cases) refuses unregistered / never-beaten / undeclared-capability /
+unapproved / over-capacity requests one by one, asserts a successful allocation writes exactly
+one row, and asserts a denial never copies the request body into `compute_audit`.
 
 ```bash
 # Still from the repository root (cd .. if the block above left you in gateway/)
 python3.11 -m venv .venv                      # 3.11 is the suite's target interpreter
 .venv/bin/pip install -r gateway/requirements-dev.txt
-cd gateway && ../.venv/bin/python -m app.main --self-test   # 22 groups green, no SKIPPED (2776 here)
-../.venv/bin/python -m pytest                                # 22 passed: same helpers, no copied assertions
+cd gateway && ../.venv/bin/python -m app.main --self-test   # 29 groups green, no SKIPPED (2932 here)
+../.venv/bin/python -m pytest                                # 51 passed: 29 adapter + 22 dedicated cases
 ```
 
 ## Cross-implementation crypto check
@@ -729,6 +796,17 @@ same code path the console reads back.
   safe procedure is `mv` followed immediately by
   `sudo launchctl kickstart -k system/com.popopx.gateway` to make the service reopen its files —
   that is what the installer's NEXT STEPS prints, not a config that pretends to roll on its own.
+- The zero-retention boundary is "no database write", not "no memory dump": the buffer is
+  overwritten after delivery, but Python may already have copied the bytes, and swap, core dumps
+  and an opponent allowed to read process memory are outside the guarantee. `TempArea` deletes
+  only when the caller passes the same area to an erase or sweep — a path left in the database
+  never deletes anything by itself.
+- Compute registration has no HTTP endpoint; it is the operator-side `registry.register_node`
+  call. `POST /api/v1/compute/allocate` records the control-plane decision and does not dispatch
+  a task to the node. Live Personal Node / Dedicated Worker, GPU and public-network heartbeat
+  behaviour is **unverified**; this machine only exercised the registry/authorizer unit
+  semantics and the HTTP semantics. Audit rows can be deleted or rewritten by anyone with read
+  and write access to the database — they are not WORM storage.
 - Not done here: an end-to-end send/receive with a real iOS client (needs a reachable broker),
   and the shape of the successful `userContactLinkCreated` frame — only failure frames were
   available, so `show_contact_address()` treats exactly one case, `userContactLinkNotFound`, as
